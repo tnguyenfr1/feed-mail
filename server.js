@@ -316,7 +316,16 @@ app.get('/api/calendar', async (req, res, next) => {
       }
     }));
     events.sort((x, y) => (x.start < y.start ? -1 : 1));
-    res.json({ events, status });
+    // The same event can come from two accounts (shared calendars, invites
+    // between your own addresses): show it once.
+    const seen = new Set();
+    const unique = events.filter((ev) => {
+      const k = `${ev.uid}|${ev.start}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    res.json({ events: unique, status });
   } catch (err) { next(err); }
 });
 
