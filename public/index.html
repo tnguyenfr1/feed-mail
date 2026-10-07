@@ -6,6 +6,13 @@
 <meta name="theme-color" content="#f6f7fb" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#111318" media="(prefers-color-scheme: dark)">
 <title>Feed Mail</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Feed Mail">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <style>
 :root {
   --bg: #f6f7fb; --card: #ffffff; --ink: #161a23; --muted: #6b7280; --line: #e5e7ee;
@@ -1094,6 +1101,7 @@ setInterval(() => { if (!document.hidden && !$('#app').classList.contains('hidde
 document.addEventListener('visibilitychange', () => { if (!document.hidden && state.accounts.length && !$('#app').classList.contains('hidden')) loadFeed(); });
 
 boot();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 </script>
 </body>
 </html>
