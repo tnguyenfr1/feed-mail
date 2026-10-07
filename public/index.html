@@ -95,7 +95,10 @@ header.top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.01em; }
 .banner { margin: 0 16px 10px; padding: 10px 12px; border-radius: 10px; font-size: 13px;
   background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
 
-#feed { flex: 1; overflow-y: auto; padding: 0 12px 24px; -webkit-overflow-scrolling: touch; }
+#feed { flex: 1; overflow-y: auto; padding: 0 12px 24px; -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
+#ptr { height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; font-size: 13px;
+  color: var(--muted); transition: height .15s ease-out; flex: none; }
+html, body { overscroll-behavior-y: none; }
 .day { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
   color: var(--muted); padding: 14px 6px 6px; }
 .card {
@@ -304,6 +307,7 @@ html, body { overflow-x: hidden; }
     </header>
     <div class="chips" id="chips"></div>
     <div id="banners"></div>
+    <div id="ptr" aria-live="polite"></div>
     <div id="feed"></div>
   </section>
 
@@ -522,15 +526,31 @@ const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max
 const fmtLong = (iso) => new Date(iso).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 const msgUrl = (m, extra = '') => `/msg/${m.acct}/${encodeURIComponent(m.uid)}${extra}${m.box === 'sent' ? '?box=sent' : ''}`;
 
+// Opening an email or the Accounts sheet adds a history step, so the phone's
+// back gesture/button closes it instead of leaving the app.
+function pushLayer(name) {
+  if (history.state?.fm !== name) history.pushState({ fm: name }, '');
+}
+function popLayer(name) {
+  if (history.state?.fm === name) history.back(); // the popstate handler closes it
+  else return true;
+}
+window.addEventListener('popstate', () => {
+  const sheet = $('.sheet-back');
+  if (sheet && history.state?.fm !== 'sheet') { sheet._close?.(true); return; }
+  if (state.current && history.state?.fm !== 'reader') closeReader(true);
+});
+
 async function openConversation(g) {
   const latest = g.latest;
   const conv = { key: g.key, acct: latest.acct, msgs: [], target: null, calSet: false };
+  if (window.innerWidth < 960) pushLayer('reader');
   state.current = conv;
   const r = $('#reader');
   r.classList.add('open');
   r.innerHTML = `<div class="reader-top"><button class="icon-btn back" aria-label="Back">←</button><div class="spacer"></div></div>
     <div class="reader-body"><div class="reader-inner"><p style="color:var(--muted)">Loading…</p></div></div>`;
-  $('.back', r).onclick = closeReader;
+  $('.back', r).onclick = () => closeReader();
   const wasUnread = g.items.filter((x) => !x.seen);
   for (const x of g.items) x.seen = true;
   renderChips(); renderFeed();
@@ -570,7 +590,8 @@ document.addEventListener('keydown', (e) => {
 });
 window.addEventListener('resize', () => applyFocus());
 
-function closeReader() {
+function closeReader(fromHistory = false) {
+  if (!fromHistory && !popLayer('reader')) return;
   state.current = null;
   applyFocus();
   $('#reader').classList.remove('open');
@@ -668,7 +689,7 @@ function renderConversation(conv) {
         <button class="btn" data-act="send">Send</button>
       </div>
     </div>`;
-  $('.back', r).onclick = closeReader;
+  $('.back', r).onclick = () => closeReader();
   applyFocus();
   renderThread(conv);
   setupComposer(conv);
@@ -864,6 +885,67 @@ function fileToBase64(file) {
   });
 }
 
+// ---------- touch gestures ----------
+// Swipe in from the left edge to go back (iPhones have no system back gesture;
+// on Android the system gesture already works through history).
+(() => {
+  const r = $('#reader');
+  let x0 = null, y0 = 0, dx = 0;
+  r.addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    if (!state.current || window.innerWidth >= 960 || t.clientX > 24) return;
+    x0 = t.clientX; y0 = t.clientY; dx = 0;
+  }, { passive: true });
+  r.addEventListener('touchmove', (e) => {
+    if (x0 === null) return;
+    const t = e.touches[0];
+    dx = t.clientX - x0;
+    if (Math.abs(t.clientY - y0) > Math.abs(dx)) { x0 = null; r.style.transform = ''; return; }
+    if (dx > 0) r.style.transform = `translateX(${dx}px)`;
+  }, { passive: true });
+  r.addEventListener('touchend', () => {
+    if (x0 === null) return;
+    x0 = null;
+    r.style.transition = 'transform .18s ease-out';
+    if (dx > 90) {
+      r.style.transform = 'translateX(100%)';
+      setTimeout(() => { r.style.transition = ''; r.style.transform = ''; closeReader(); }, 180);
+    } else {
+      r.style.transform = '';
+      setTimeout(() => { r.style.transition = ''; }, 180);
+    }
+  });
+})();
+
+// Pull down at the top of the feed to refresh.
+(() => {
+  const feed = $('#feed');
+  const ptr = $('#ptr');
+  const PULL = 70;
+  let y0 = null, dy = 0;
+  const show = (h, text) => { ptr.style.height = h + 'px'; ptr.textContent = text; };
+  feed.addEventListener('touchstart', (e) => {
+    if (feed.scrollTop > 0 || state.loading) return;
+    y0 = e.touches[0].clientY; dy = 0;
+  }, { passive: true });
+  feed.addEventListener('touchmove', (e) => {
+    if (y0 === null) return;
+    dy = e.touches[0].clientY - y0;
+    if (dy <= 0 || feed.scrollTop > 0) { show(0, ''); return; }
+    const h = Math.min(90, dy * 0.5);
+    show(h, h >= PULL * 0.5 + 10 ? '↻ Release to refresh' : '↓ Pull to refresh');
+  }, { passive: true });
+  feed.addEventListener('touchend', async () => {
+    if (y0 === null) return;
+    y0 = null;
+    if (dy * 0.5 >= PULL * 0.5 + 10) {
+      show(44, 'Refreshing…');
+      await loadFeed(true);
+    }
+    show(0, '');
+  });
+})();
+
 // ---------- calendar panel ----------
 const pad2 = (n) => String(n).padStart(2, '0');
 const localYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
@@ -998,6 +1080,12 @@ async function openSettings() {
   const providers = await api('/providers');
   const back = document.createElement('div');
   back.className = 'sheet-back';
+  pushLayer('sheet');
+  back._close = (fromHistory = false) => {
+    if (!fromHistory && !popLayer('sheet')) return;
+    back.remove();
+    loadFeed(true);
+  };
   let color = COLORS[state.accounts.length % COLORS.length];
   back.innerHTML = `<div class="sheet" role="dialog" aria-label="Accounts">
     <div style="display:flex;align-items:center"><h2 style="flex:1">Accounts</h2><button class="icon-btn" data-close aria-label="Close">✕</button></div>
@@ -1080,7 +1168,7 @@ async function openSettings() {
   list();
 
   back.addEventListener('click', async (e) => {
-    if (e.target === back || e.target.closest('[data-close]')) { back.remove(); loadFeed(true); return; }
+    if (e.target === back || e.target.closest('[data-close]')) { back._close(); return; }
     const c = e.target.closest('[data-c]');
     if (c) { color = c.dataset.c; back.querySelectorAll('[data-c]').forEach((x) => x.classList.toggle('on', x === c)); return; }
     const del = e.target.closest('[data-del]');
