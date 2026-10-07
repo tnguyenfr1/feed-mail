@@ -723,7 +723,7 @@ function frameDoc(html, showImages) {
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' https:; img-src ${img}; font-src data: https:;">
     <base target="_blank">
     <style>
-      html{-webkit-text-size-adjust:100%}
+      html{-webkit-text-size-adjust:100%;overflow:hidden}
       body{margin:12px;font:15px/1.5 system-ui,sans-serif;color:#161a23;background:#fff;overflow-wrap:anywhere}
       img,video{max-width:100%!important;height:auto!important}
       table{max-width:100%!important}
@@ -823,8 +823,9 @@ function renderThread(conv) {
         body.style.zoom = '';
         const avail = frame.clientWidth;
         const wide = Math.max(doc.documentElement.scrollWidth, body.scrollWidth);
-        if (wide > avail + 2) body.style.zoom = String(Math.max(0.3, avail / wide));
-        frame.style.height = doc.documentElement.scrollHeight + 'px';
+        // A little slack so rounding never leaves the email a pixel too wide.
+        if (wide > avail) body.style.zoom = String(Math.max(0.3, (avail - 4) / wide));
+        frame.style.height = (doc.documentElement.scrollHeight + 4) + 'px';
       } catch {}
     };
     frame.addEventListener('load', () => {

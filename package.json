@@ -1,14 +1,12 @@
 {
-  "name": "feedmail",
+  "name": "feed-mail",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "All your email accounts in one feed, with your calendars beside every email. Self-hosted, private.",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "chrono-node": "^2.10.2",
