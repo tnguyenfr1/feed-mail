@@ -363,3 +363,8 @@ app.use('/api', (err, req, res, next) => {
 app.use(express.static(new URL('./public', import.meta.url).pathname, { index: 'index.html' }));
 
 app.listen(PORT, HOST, () => console.log(`Feed Mail on http://${HOST}:${PORT}`));
+
+// Keep every inbox warm in the background so opening the app is instant.
+const warm = () => accounts.forEach((a) => refresh(a));
+setTimeout(warm, 2000);
+setInterval(warm, 2 * 60 * 1000);

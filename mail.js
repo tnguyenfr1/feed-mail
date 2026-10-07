@@ -52,6 +52,8 @@ async function getClient(acct) {
 }
 
 export function dropClient(acctId) {
+  known.delete(acctId);
+  sentCache.delete(acctId);
   const p = clients.get(acctId);
   clients.delete(acctId);
   p?.then((c) => c.logout().catch(() => c.close())).catch(() => {});
@@ -202,30 +204,41 @@ function addr(a) {
   return a ? { name: a.name || '', address: a.address || '' } : null;
 }
 
+// Per account: what we already know about each message (headers + preview),
+// so a refresh only downloads new mail. Memory only.
+const known = new Map(); // account id -> { validity, byUid: Map(uid -> item) }
+
 export async function fetchFeed(acct) {
-  const raw = await withInbox(acct, async (c) => {
+  const { flags, fresh, validity } = await withInbox(acct, async (c) => {
     const exists = c.mailbox.exists;
-    if (!exists) return [];
+    const validity = String(c.mailbox.uidValidity);
+    if (!exists) return { flags: [], fresh: [], validity };
     const start = Math.max(1, exists - FEED_SIZE + 1);
-    const out = [];
-    for await (const m of c.fetch(`${start}:*`, {
-      uid: true, flags: true, envelope: true, internalDate: true, bodyStructure: true,
-      source: { maxLength: PREVIEW_BYTES },
-    })) out.push(m);
-    return out;
+    const flags = [];
+    for await (const m of c.fetch(`${start}:*`, { uid: true, flags: true })) flags.push(m);
+
+    const k = known.get(acct.id);
+    const byUid = k && k.validity === validity ? k.byUid : new Map();
+    const missing = flags.filter((m) => !byUid.has(m.uid)).map((m) => m.uid);
+    const fresh = [];
+    if (missing.length) {
+      for await (const m of c.fetch(missing.join(','), {
+        uid: true, envelope: true, internalDate: true, bodyStructure: true,
+        source: { maxLength: PREVIEW_BYTES },
+      }, { uid: true })) fresh.push(m);
+    }
+    return { flags, fresh, validity };
   }, { fresh: true });
 
-  let replies = new Map();
-  try { replies = await sentIndex(acct); } catch {}
-
-  const items = [];
-  for (const m of raw) {
+  const prev = known.get(acct.id);
+  const byUid = prev && prev.validity === validity ? prev.byUid : new Map();
+  for (const m of fresh) {
     let preview = '';
     try {
       preview = makePreview(await simpleParser(m.source, { skipImageLinks: true, skipTextToHtml: true }));
     } catch {}
     const env = m.envelope || {};
-    items.push({
+    byUid.set(m.uid, {
       id: `${acct.id}:${m.uid}`,
       acct: acct.id,
       uid: m.uid,
@@ -233,16 +246,30 @@ export async function fetchFeed(acct) {
       from: addr(env.from?.[0]),
       to: (env.to || []).map(addr),
       subject: env.subject || '(no subject)',
-      seen: m.flags?.has('\\Seen') || false,
       messageId: env.messageId || null,
-      replied: replies.get(env.messageId) || (m.flags?.has('\\Answered') ? { at: null, uid: null } : null),
-      answered: m.flags?.has('\\Answered') || false,
-      flagged: m.flags?.has('\\Flagged') || false,
       attach: hasAttachment(m.bodyStructure),
       preview,
     });
   }
-  return items;
+  // Forget messages that dropped out of the window (deleted, moved, or old).
+  const current = new Set(flags.map((m) => m.uid));
+  for (const uid of byUid.keys()) if (!current.has(uid)) byUid.delete(uid);
+  known.set(acct.id, { validity, byUid });
+
+  let replies = new Map();
+  try { replies = await sentIndex(acct); } catch {}
+
+  return flags.filter((m) => byUid.has(m.uid)).map((m) => {
+    const base = byUid.get(m.uid);
+    const answered = m.flags?.has('\\Answered') || false;
+    return {
+      ...base,
+      seen: m.flags?.has('\\Seen') || false,
+      flagged: m.flags?.has('\\Flagged') || false,
+      answered,
+      replied: replies.get(base.messageId) || (answered ? { at: null, uid: null } : null),
+    };
+  });
 }
 
 async function fetchParsed(acct, uid, c) {
