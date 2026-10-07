@@ -11,9 +11,12 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "chrono-node": "^2.10.2",
     "express": "^5.2.1",
+    "ical.js": "^2.2.1",
     "imapflow": "^2.2.7",
     "mailparser": "^3.9.36",
-    "nodemailer": "^10.0.15"
+    "nodemailer": "^10.0.15",
+    "tsdav": "^2.4.0"
   }
 }

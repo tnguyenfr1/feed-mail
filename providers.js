@@ -25,6 +25,18 @@ export const PROVIDERS = {
 
 const GMX_NET_DOMAINS = ['gmx.net', 'gmx.de', 'gmx.at', 'gmx.ch'];
 
+const CALDAV = {
+  yahoo: 'https://caldav.calendar.yahoo.com',
+  aol: 'https://caldav.aol.com', // unverified until an AOL account is added
+  gmx: 'https://caldav.gmx.com',
+};
+
+export function caldavUrlFor(account) {
+  const domain = account.email.split('@')[1]?.toLowerCase();
+  if (account.provider === 'gmx' && GMX_NET_DOMAINS.includes(domain)) return 'https://caldav.gmx.net';
+  return CALDAV[account.provider] || null;
+}
+
 export function serversFor(account) {
   const p = PROVIDERS[account.provider];
   if (!p) throw new Error('Unknown provider ' + account.provider);

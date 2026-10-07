@@ -5,6 +5,7 @@ import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import { serversFor } from './providers.js';
+import { parseInvite, findDates } from './calendar.js';
 
 const FEED_SIZE = 50; // newest messages per account
 const PREVIEW_BYTES = 20000; // enough of each message to build a preview
@@ -191,9 +192,14 @@ export async function getMessage(acct, uid) {
     }
   }
 
+  const ics = findIcs(parsed);
+  const invite = ics ? parseInvite(ics) : null;
+
   return {
     acct: acct.id,
     uid: Number(uid),
+    invite,
+    dates: findDates(parsed.subject, parsed.text, parsed.date || new Date()),
     subject: parsed.subject || '(no subject)',
     date: (parsed.date || new Date()).toISOString(),
     from: list(parsed.from)[0] || null,
@@ -205,6 +211,39 @@ export async function getMessage(acct, uid) {
       .map((a, i) => ({ idx: i, filename: a.filename || 'attachment', size: a.size, contentType: a.contentType, related: a.related }))
       .filter((a) => !a.related),
   };
+}
+
+// The calendar invite (text/calendar part or .ics file) inside a message, if any.
+function findIcs(parsed) {
+  const a = parsed.attachments.find((x) => /text\/calendar/i.test(x.contentType) || /\.ics$/i.test(x.filename || ''));
+  return a ? a.content.toString('utf8') : null;
+}
+
+export async function getInviteIcs(acct, uid) {
+  const { parsed } = await withInbox(acct, (c) => fetchParsed(acct, uid, c));
+  const ics = findIcs(parsed);
+  if (!ics) throw Object.assign(new Error('This email has no invitation.'), { status: 404 });
+  return { ics, parsed };
+}
+
+export async function sendInviteReply(acct, parsed, icsReply, label) {
+  const servers = serversFor(acct);
+  const invite = parseInvite(icsReply);
+  const to = invite?.organizer?.address || list(parsed.replyTo)[0]?.address || list(parsed.from)[0]?.address;
+  const mail = {
+    from: acct.name ? { name: acct.name, address: acct.email } : acct.email,
+    to,
+    subject: `${label}: ${invite?.title || parsed.subject || ''}`,
+    text: `${label}: ${invite?.title || ''}`,
+    icalEvent: { method: 'REPLY', content: icsReply },
+  };
+  const raw = await new MailComposer(mail).compile().build();
+  const transport = nodemailer.createTransport({ ...servers.smtp, auth: { user: acct.email, pass: acct.password } });
+  try {
+    await transport.sendMail({ envelope: { from: acct.email, to: [to] }, raw });
+  } catch (err) {
+    throw friendly(err);
+  }
 }
 
 export async function getAttachment(acct, uid, idx) {

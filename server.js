@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import express from 'express';
 import { loadAccounts, saveAccounts, loadConfig, saveConfig } from './store.js';
-import { PROVIDERS } from './providers.js';
+import { PROVIDERS, caldavUrlFor } from './providers.js';
 import * as mail from './mail.js';
+import * as cal from './calendar.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -90,7 +91,7 @@ app.use('/api', (req, res, next) => (loggedIn(req) ? next() : res.status(401).js
 
 // ---------- accounts ----------
 
-const publicAccount = ({ password, ...a }) => a;
+const publicAccount = ({ password, calPassword, ...a }) => ({ ...a, hasCalPassword: !!calPassword, calendar: !!caldavUrlFor(a) });
 const findAccount = (id) => {
   const a = accounts.find((x) => x.id === id);
   if (!a) throw Object.assign(new Error('Unknown account'), { status: 404 });
@@ -121,11 +122,17 @@ app.post('/api/accounts', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-app.patch('/api/accounts/:id', (req, res, next) => {
+app.patch('/api/accounts/:id', async (req, res, next) => {
   try {
     const a = findAccount(req.params.id);
     if (typeof req.body.name === 'string') a.name = req.body.name.trim();
     if (typeof req.body.color === 'string') a.color = req.body.color;
+    if (typeof req.body.calPassword === 'string') {
+      const calPassword = req.body.calPassword.replace(/\s+/g, '');
+      await cal.testCalendar({ ...a, calPassword: calPassword || undefined });
+      a.calPassword = calPassword || undefined;
+      cal.forgetCalendar(a.id);
+    }
     saveAccounts(accounts);
     res.json(publicAccount(a));
   } catch (err) { next(err); }
@@ -137,6 +144,7 @@ app.delete('/api/accounts/:id', (req, res, next) => {
     accounts = accounts.filter((a) => a.id !== req.params.id);
     saveAccounts(accounts);
     mail.dropClient(req.params.id);
+    cal.forgetCalendar(req.params.id);
     cache.delete(req.params.id);
     res.json({ ok: true });
   } catch (err) { next(err); }
@@ -222,6 +230,44 @@ app.post('/api/msg/:acct/:uid/reply', async (req, res, next) => {
     await mail.sendReply(findAccount(req.params.acct), req.params.uid, { body, all: !!req.body.all });
     patchCached(req.params.acct, req.params.uid, (it) => { it.answered = true; });
     res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ---------- calendar ----------
+
+app.get('/api/calendar', async (req, res, next) => {
+  try {
+    const from = new Date(req.query.from), to = new Date(req.query.to);
+    if (isNaN(from) || isNaN(to) || to <= from || to - from > 62 * 864e5) return res.status(400).json({ error: 'Bad date range' });
+    const events = [];
+    const status = {};
+    await Promise.all(accounts.filter((a) => caldavUrlFor(a)).map(async (a) => {
+      try {
+        events.push(...await cal.fetchEvents(a, from, to));
+        status[a.id] = { ok: true };
+      } catch (err) {
+        status[a.id] = { error: err.message };
+      }
+    }));
+    events.sort((x, y) => (x.start < y.start ? -1 : 1));
+    res.json({ events, status });
+  } catch (err) { next(err); }
+});
+
+const RSVP = { ACCEPTED: 'Accepted', TENTATIVE: 'Tentative', DECLINED: 'Declined' };
+
+app.post('/api/msg/:acct/:uid/rsvp', async (req, res, next) => {
+  try {
+    const partstat = String(req.body.response || '').toUpperCase();
+    if (!RSVP[partstat]) return res.status(400).json({ error: 'Bad response' });
+    const acct = findAccount(req.params.acct);
+    const { ics, parsed } = await mail.getInviteIcs(acct, req.params.uid);
+    await mail.sendInviteReply(acct, parsed, cal.buildReply(ics, acct.email, partstat), RSVP[partstat]);
+    let savedTo = null, calendarError = null;
+    if (partstat !== 'DECLINED' && caldavUrlFor(acct)) {
+      try { savedTo = await cal.addToCalendar(acct, ics, partstat); } catch (err) { calendarError = err.message; }
+    }
+    res.json({ ok: true, savedTo, calendarError });
   } catch (err) { next(err); }
 });
 

@@ -169,6 +169,43 @@ header.top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.01em; }
 .colors button { width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; }
 .colors button.on { border-color: var(--ink); }
 .hint { font-size: 13px; color: var(--muted); background: var(--bg); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+/* ---------- calendar panel ---------- */
+.reader-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+.reader-grid .cal { order: -1; }
+@media (min-width: 1280px) {
+  .reader-inner.wide { max-width: 1180px; }
+  .reader-grid { grid-template-columns: minmax(0, 1fr) 300px; align-items: start; }
+  .reader-grid .cal { order: 0; position: sticky; top: 0; }
+}
+.cal { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.cal > summary { list-style: none; cursor: pointer; padding: 12px 14px; display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.cal > summary::-webkit-details-marker { display: none; }
+.cal > summary .sum-sub { font-weight: 400; color: var(--muted); font-size: 13px; flex: 1; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal > summary .sum-sub.clash { color: var(--danger); font-weight: 600; }
+.cal-body { padding: 0 14px 14px; }
+.cal-days { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.cal-days .chip { padding: 4px 10px; font-size: 12px; }
+.cal-days .chip small { opacity: .7; }
+.cal-nav { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.cal-nav b { flex: 1; font-size: 14px; }
+.cal-nav button { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; width: 30px; height: 30px; }
+.ev { display: flex; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.ev:first-child { border-top: 0; }
+.ev .bar { width: 4px; border-radius: 2px; background: var(--acct); flex: none; }
+.ev .t { flex: none; width: 92px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.ev .what { flex: 1; min-width: 0; }
+.ev .what div:last-child { color: var(--muted); font-size: 12px; }
+.ev.clash .t, .ev.clash .what > div:first-child { color: var(--danger); }
+.ev.clash .what > div:first-child::after { content: " · clash"; font-size: 12px; font-weight: 600; }
+.ev.free { color: var(--muted); }
+.invite { border: 2px dashed var(--accent); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; font-size: 14px; }
+.invite .lbl { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
+.invite .ttl { font-weight: 600; margin: 2px 0; }
+.invite .muted { color: var(--muted); font-size: 13px; }
+.invite .rsvp { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.invite .rsvp .btn { padding: 7px 12px; font-size: 13px; }
+.cal-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+.cal-note.bad { color: var(--danger); }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
 </style>
@@ -408,6 +445,7 @@ function frameDoc(html, showImages) {
 function renderMessage(msg, showImages) {
   const a = acctOf(msg.acct);
   const hasRemote = msg.html && /<img[^>]+src=["']?https?:/i.test(msg.html);
+  const hasCal = state.accounts.some((x) => x.calendar);
   const r = $('#reader');
   r.innerHTML = `
     <div class="reader-top">
@@ -416,7 +454,7 @@ function renderMessage(msg, showImages) {
       <button class="btn ghost" data-act="unread">Mark unread</button>
       <button class="btn danger" data-act="delete">Delete</button>
     </div>
-    <div class="reader-body"><div class="reader-inner">
+    <div class="reader-body"><div class="reader-inner ${hasCal ? 'wide' : ''}"><div class="reader-grid"><div class="msg-col">
       <h2>${esc(msg.subject)}</h2>
       <div class="meta">
         <div class="avatar" style="--acct:${a.color}">${esc(initials(msg.from))}</div>
@@ -432,7 +470,7 @@ function renderMessage(msg, showImages) {
         : `<div class="msg-text">${linkify(msg.text)}</div>`}
       ${msg.attachments.length ? `<div class="atts">${msg.attachments.map((x) =>
         `<a class="att" href="/api/msg/${msg.acct}/${msg.uid}/att/${x.idx}">📎 ${esc(x.filename)} <span style="color:var(--muted)">${fmtSize(x.size)}</span></a>`).join('')}</div>` : ''}
-    </div></div>
+    </div>${hasCal ? '<details class="cal" id="calPanel"></details>' : ''}</div></div></div>
     <div class="composer">
       <textarea id="replyText" placeholder="Write a reply…"></textarea>
       <div class="actions">
@@ -487,9 +525,140 @@ function renderMessage(msg, showImages) {
       b.disabled = false; b.textContent = 'Send';
     }
   };
+  if (hasCal && !showImages) setupCalendar(msg);
+  else if (hasCal && state.calKeep) { $('#calPanel').replaceWith(state.calKeep); }
   $('#replyText').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('[data-act="send"]', r).click();
   });
+}
+
+// ---------- calendar panel ----------
+const pad2 = (n) => String(n).padStart(2, '0');
+const localYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const parseYmd = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (s, n) => { const d = parseYmd(s); d.setDate(d.getDate() + n); return localYmd(d); };
+const hm = (d) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const dayName = (s) => {
+  const t = localYmd(new Date());
+  if (s === t) return 'Today';
+  if (s === addDays(t, 1)) return 'Tomorrow';
+  return parseYmd(s).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+};
+const inviteDay = (inv) => (inv.allDay ? inv.start : localYmd(new Date(inv.start)));
+
+// Does an event (timed or all-day) touch the given local day?
+function onDay(ev, day) {
+  if (ev.allDay) return ev.start <= day && day < (ev.end > ev.start ? ev.end : addDays(ev.start, 1));
+  const s = new Date(ev.start), e = new Date(ev.end), d0 = parseYmd(day), d1 = parseYmd(addDays(day, 1));
+  return e > d0 && s < d1;
+}
+function overlaps(a, b) {
+  if (a.allDay || b.allDay) return false;
+  return new Date(a.start) < new Date(b.end) && new Date(b.start) < new Date(a.end);
+}
+
+function setupCalendar(msg) {
+  const inv = msg.invite && msg.invite.start ? msg.invite : null;
+  const today = localYmd(new Date());
+  const tabs = [];
+  if (inv) tabs.push({ day: inviteDay(inv), label: 'Invite' });
+  for (const d of msg.dates || []) if (d.date >= today) tabs.push({ day: d.date, label: d.text });
+  tabs.push({ day: today, label: '' });
+  const uniq = tabs.filter((t, i) => tabs.findIndex((x) => x.day === t.day) === i);
+  const cs = { msg, inv, tabs: uniq, day: uniq[0].day, rsvp: null };
+  const panel = $('#calPanel');
+  panel.open = !!inv || uniq.length > 1 || window.matchMedia('(min-width: 1280px)').matches;
+  state.calKeep = panel;
+  panel._cs = cs;
+  panel.addEventListener('click', async (e) => {
+    const t = e.target.closest('[data-day]');
+    if (t) { e.preventDefault(); cs.day = t.dataset.day; return loadCalDay(panel); }
+    const r = e.target.closest('[data-rsvp]');
+    if (r) { e.preventDefault(); return sendRsvp(panel, r.dataset.rsvp); }
+  });
+  loadCalDay(panel);
+}
+
+async function loadCalDay(panel) {
+  const cs = panel._cs;
+  const day = cs.day;
+  renderCal(panel, null);
+  const from = parseYmd(day), to = parseYmd(addDays(day, 1));
+  try {
+    const data = await api(`/calendar?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`);
+    if (cs.day !== day) return;
+    renderCal(panel, data);
+  } catch (err) {
+    if (cs.day === day) renderCal(panel, { events: [], status: {}, error: err.message });
+  }
+}
+
+function renderCal(panel, data) {
+  const cs = panel._cs;
+  const { inv, day } = cs;
+  const events = data ? data.events.filter((ev) => onDay(ev, day)) : [];
+  const invHere = inv && onDay(inv, day);
+  const already = invHere && events.some((ev) => ev.uid === inv.uid);
+  const shown = events.filter((ev) => !(invHere && ev.uid === inv.uid && !already));
+  const clashes = invHere ? shown.filter((ev) => ev.uid !== inv.uid && overlaps(ev, inv)) : [];
+
+  const summarySub = !data ? 'Loading…'
+    : clashes.length ? `${dayName(day)} · ${clashes.length} clash${clashes.length > 1 ? 'es' : ''}`
+    : `${dayName(day)} · ${shown.length ? shown.length + ' event' + (shown.length > 1 ? 's' : '') : 'free'}`;
+
+  const tabsHtml = cs.tabs.length > 1 || !cs.tabs.some((t) => t.day === day)
+    ? `<div class="cal-days">${cs.tabs.map((t) => `<button class="chip ${t.day === day ? 'on' : ''}" data-day="${t.day}">${esc(dayName(t.day))}${t.label ? ` <small>${esc(t.label)}</small>` : ''}</button>`).join('')}</div>` : '';
+
+  const when = (ev) => ev.allDay ? 'All day' : `${hm(new Date(ev.start))}–${hm(new Date(ev.end))}`;
+  const inviteHtml = invHere ? `<div class="invite">
+      <div class="lbl">${inv.method === 'CANCEL' ? 'Cancelled' : 'Invitation'}${already ? ' · in your calendar' : ''}</div>
+      <div class="ttl">${esc(inv.title)}</div>
+      <div class="muted">${esc(when(inv))}${inv.location ? ' · ' + esc(inv.location) : ''}${inv.recurring ? ' · repeats' : ''}</div>
+      ${inv.organizer ? `<div class="muted">from ${esc(inv.organizer.name || inv.organizer.address)}</div>` : ''}
+      ${inv.method === 'REQUEST' ? (cs.rsvp
+        ? `<div class="cal-note ${cs.rsvp.bad ? 'bad' : ''}">${esc(cs.rsvp.text)}</div>`
+        : `<div class="rsvp"><button class="btn" data-rsvp="ACCEPTED">Accept</button><button class="btn ghost" data-rsvp="TENTATIVE">Maybe</button><button class="btn danger" data-rsvp="DECLINED">Decline</button></div>`) : ''}
+    </div>` : '';
+
+  const evHtml = !data ? `<div class="ev free">Loading your calendars…</div>`
+    : shown.length ? shown.map((ev) => {
+        const a = acctOf(ev.acct);
+        const clash = clashes.includes(ev);
+        return `<div class="ev ${clash ? 'clash' : ''}" style="--acct:${a.color}"><span class="bar"></span>
+          <span class="t">${esc(when(ev))}</span>
+          <span class="what"><div>${esc(ev.title)}</div><div>${esc([ev.location, acctLabel(a)].filter(Boolean).join(' · '))}</div></span></div>`;
+      }).join('')
+    : `<div class="ev free">Nothing scheduled${invHere ? ' — you are free' : ''}.</div>`;
+
+  const notes = data ? Object.entries(data.status || {}).filter(([, v]) => v.error)
+    .map(([id, v]) => `<div class="cal-note bad">${esc(acctLabel(acctOf(id)))}: ${esc(v.error)}</div>`).join('')
+    + (data.error ? `<div class="cal-note bad">${esc(data.error)}</div>` : '') : '';
+
+  panel.innerHTML = `<summary>📅 Calendar <span class="sum-sub ${clashes.length ? 'clash' : ''}">${esc(summarySub)}</span></summary>
+    <div class="cal-body">
+      ${tabsHtml}
+      <div class="cal-nav"><button data-day="${addDays(day, -1)}" aria-label="Previous day">‹</button>
+        <b>${esc(parseYmd(day).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' }))}</b>
+        <button data-day="${addDays(day, 1)}" aria-label="Next day">›</button></div>
+      ${inviteHtml}
+      <div>${evHtml}</div>
+      ${notes}
+    </div>`;
+}
+
+async function sendRsvp(panel, response) {
+  const cs = panel._cs;
+  panel.querySelectorAll('[data-rsvp]').forEach((b) => { b.disabled = true; });
+  try {
+    const r = await api(`/msg/${cs.msg.acct}/${cs.msg.uid}/rsvp`, { method: 'POST', body: { response } });
+    const word = { ACCEPTED: 'Accepted', TENTATIVE: 'Answered maybe', DECLINED: 'Declined' }[response];
+    cs.rsvp = { text: `${word} — the organizer has been told.` + (r.savedTo ? ` Added to ${r.savedTo}.` : '') + (r.calendarError ? ` (Could not add to calendar: ${r.calendarError})` : ''), bad: !!r.calendarError };
+    toast(word + ' ✓');
+  } catch (err) {
+    cs.rsvp = null;
+    toast(err.message);
+  }
+  loadCalDay(panel);
 }
 
 // ---------- settings ----------
@@ -520,7 +689,7 @@ async function openSettings() {
   const HINTS = {
     yahoo: 'Use a Yahoo <b>app password</b> (Account security → Generate app password), not your normal password.',
     aol: 'Use an AOL <b>app password</b> (Account security → Generate app password), not your normal password.',
-    gmx: 'Switch on IMAP first: GMX Settings → POP3 &amp; IMAP → allow access. Use your GMX password, or an app-specific password if you use 2-step login.',
+    gmx: 'Switch on IMAP first: GMX Settings → POP3 &amp; IMAP → allow access. Use your GMX password, or an app-specific password if you use 2-step login. For the calendar, GMX needs its own application-specific password: add it here after the account is saved.',
   };
   const sel = $('select', back);
   const hint = () => { $('#provHint', back).innerHTML = HINTS[sel.value] || ''; };
@@ -530,7 +699,11 @@ async function openSettings() {
     $('#acctList', back).innerHTML = state.accounts.length
       ? state.accounts.map((a) => `<div class="acct-row"><span class="chip"><span class="dot" style="background:${a.color}"></span></span>
           <div class="info"><div>${esc(acctLabel(a))}</div><div>${esc(a.email)} · ${esc(a.provider.toUpperCase())}</div></div>
-          <button class="btn danger" data-del="${a.id}">Remove</button></div>`).join('')
+          <button class="btn danger" data-del="${a.id}">Remove</button></div>
+          ${a.calendar ? `<form class="calpw" data-acct="${a.id}" style="display:flex;gap:8px;padding:8px 0 4px;align-items:center">
+            <input type="password" name="calPassword" autocomplete="new-password" placeholder="${a.hasCalPassword ? 'Calendar password saved ✓ (type to change)' : 'Calendar password (only if different)'}"
+              style="flex:1;min-width:0;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg)">
+            <button class="btn ghost" style="padding:8px 12px">Save</button></form>` : ''}`).join('')
       : `<p class="sub">No accounts yet. Add your first one below.</p>`;
   };
   list();
@@ -549,6 +722,17 @@ async function openSettings() {
       return;
     }
     if (e.target.closest('[data-logout]')) { await api('/logout', { method: 'POST' }); location.reload(); }
+  });
+
+  back.addEventListener('submit', async (e) => {
+    const f = e.target.closest('.calpw'); if (!f) return;
+    e.preventDefault();
+    const btn = $('button', f); btn.disabled = true; btn.textContent = 'Testing…';
+    try {
+      const updated = await api('/accounts/' + f.dataset.acct, { method: 'PATCH', body: { calPassword: f.calPassword.value } });
+      Object.assign(state.accounts.find((a) => a.id === updated.id), updated);
+      list(); toast('Calendar connected ✓');
+    } catch (err) { toast(err.message); btn.disabled = false; btn.textContent = 'Save'; }
   });
 
   $('#addForm', back).addEventListener('submit', async (e) => {
