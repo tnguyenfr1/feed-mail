@@ -257,6 +257,18 @@ header.top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.01em; }
 .reply-target:empty { display: none; }
 .reply-target span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reply-target .x { border: 0; background: none; color: var(--muted); font-size: 15px; padding: 0 4px; }
+/* Nothing inside an open email may push the page wider than the screen. */
+html, body { overflow-x: hidden; }
+.reader-grid { grid-template-columns: minmax(0, 1fr) !important; }
+.msg-col, .tmsg, .tm-body, .msg-frame-wrap { min-width: 0; max-width: 100%; }
+.msg-text, .tm-who b, .tm-to, .reader-body h2 { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .reader-body { padding: 10px 8px; }
+  .tm-body { padding: 0 8px 4px; }
+  .tm-head { padding: 10px 8px; }
+  .tm-actions { padding: 6px 8px 10px; }
+  .reader-top .btn { padding: 8px 10px; font-size: 13px; }
+}
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
 </style>
@@ -578,7 +590,13 @@ function frameDoc(html, showImages) {
   return `<!doctype html><html><head><meta charset="utf-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' https:; img-src ${img}; font-src data: https:;">
     <base target="_blank">
-    <style>body{margin:16px;font:15px/1.5 system-ui,sans-serif;color:#161a23;background:#fff;word-wrap:break-word}img{max-width:100%;height:auto}table{max-width:100%}</style>
+    <style>
+      html{-webkit-text-size-adjust:100%}
+      body{margin:12px;font:15px/1.5 system-ui,sans-serif;color:#161a23;background:#fff;overflow-wrap:anywhere}
+      img,video{max-width:100%!important;height:auto!important}
+      table{max-width:100%!important}
+      pre{white-space:pre-wrap}
+    </style>
     </head><body>${html}</body></html>`;
 }
 
@@ -663,11 +681,24 @@ function renderThread(conv) {
   t.innerHTML = conv.msgs.map((m, i) => messageHtml(conv, m, i)).join('');
   t.querySelectorAll('[data-frame]').forEach((frame) => {
     const m = conv.msgs[Number(frame.dataset.frame)];
-    const fit = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 'px'; } catch {} };
+    // Emails built for 600-700px wide screens get zoomed out to fit (like
+    // Gmail's auto-fit); then the frame grows to the email's full height.
+    const fit = () => {
+      try {
+        const doc = frame.contentDocument;
+        const body = doc.body;
+        body.style.zoom = '';
+        const avail = frame.clientWidth;
+        const wide = Math.max(doc.documentElement.scrollWidth, body.scrollWidth);
+        if (wide > avail + 2) body.style.zoom = String(Math.max(0.3, avail / wide));
+        frame.style.height = doc.documentElement.scrollHeight + 'px';
+      } catch {}
+    };
     frame.addEventListener('load', () => {
       fit();
       frame.contentDocument?.querySelectorAll('img').forEach((img) => img.addEventListener('load', fit));
       setTimeout(fit, 500);
+      setTimeout(fit, 1500);
     });
     frame.srcdoc = frameDoc(m.full.html, m.showImages);
   });
