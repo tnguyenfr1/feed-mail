@@ -296,6 +296,13 @@ html, body { overflow-x: hidden; }
   .tm-actions { padding: 6px 8px 10px; }
   .reader-top .btn { padding: 8px 10px; font-size: 13px; }
 }
+.ag-day { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin-bottom: 8px; }
+.ag-day.today { border-color: var(--accent); }
+.ag-day.free { padding-top: 8px; padding-bottom: 8px; }
+.ag-date { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.ag-day.today .ag-date { color: var(--accent); }
+.ag-free { color: var(--muted); font-size: 13px; }
+.ag-date + .ev { border-top: 0; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
 </style>
@@ -322,6 +329,9 @@ html, body { overflow-x: hidden; }
       <div class="seg" id="viewToggle" role="group" aria-label="View">
         <button data-v="conv" title="Conversations"><span class="long">Conversations</span><span class="short">Threads</span></button><button data-v="all" title="Every email">All</button>
       </div>
+      <button class="icon-btn" id="calBtn" title="Calendar" aria-label="Calendar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+      </button>
       <button class="icon-btn" id="refreshBtn" title="Refresh" aria-label="Refresh">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
       </button>
@@ -410,6 +420,7 @@ async function startApp() {
   $('#app').classList.remove('hidden');
   state.accounts = await api('/accounts');
   renderChips();
+  if (!state.current) showIdleReader();
   if (!state.accounts.length) { renderFeed(); openSettings(); return; }
   loadFeed();
 }
@@ -631,8 +642,72 @@ function closeReader(fromHistory = false) {
   state.current = null;
   applyFocus();
   $('#reader').classList.remove('open');
-  $('#reader').innerHTML = `<div class="reader-placeholder">Pick an email from the feed</div>`;
+  showIdleReader();
   renderFeed();
+}
+
+// With no email open, a computer's right-hand side shows the calendar.
+function showIdleReader() {
+  if (window.innerWidth >= 960 && state.accounts.some((a) => a.calendar)) renderAgenda($('#reader'), { embedded: true });
+  else $('#reader').innerHTML = `<div class="reader-placeholder">Pick an email from the feed</div>`;
+}
+
+// ---------- calendar page ----------
+const AGENDA_DAYS = 14;
+
+function openAgenda() {
+  if (window.innerWidth >= 960) { if (state.current) closeReader(); else showIdleReader(); return; }
+  pushLayer('reader');
+  state.current = { key: 'agenda', agenda: true };
+  $('#reader').classList.add('open');
+  renderAgenda($('#reader'), { embedded: false });
+}
+
+async function renderAgenda(root, { embedded, start } = {}) {
+  const today = localYmd(new Date());
+  const from = start || today;
+  const to = addDays(from, AGENDA_DAYS);
+  const token = Symbol();
+  root._agenda = token;
+  const top = `<div class="reader-top">
+      ${embedded ? '' : '<button class="icon-btn back" aria-label="Back">←</button>'}
+      <b style="font-size:17px">📅 Calendar</b><div class="spacer"></div>
+      <button class="btn ghost" data-ag="${addDays(from, -AGENDA_DAYS)}" aria-label="Previous two weeks">‹</button>
+      <button class="btn ghost" data-ag="${today}">Today</button>
+      <button class="btn ghost" data-ag="${to}" aria-label="Next two weeks">›</button>
+    </div>`;
+  root.innerHTML = `${top}<div class="reader-body"><div class="reader-inner"><p class="muted">Loading your calendars…</p></div></div>`;
+  const wire = () => {
+    $('.back', root)?.addEventListener('click', () => closeReader());
+    root.querySelectorAll('[data-ag]').forEach((b) => b.addEventListener('click', () => renderAgenda(root, { embedded, start: b.dataset.ag })));
+  };
+  wire();
+  let data;
+  try {
+    data = await api(`/calendar?from=${encodeURIComponent(parseYmd(from).toISOString())}&to=${encodeURIComponent(parseYmd(to).toISOString())}`);
+  } catch (err) { data = { events: [], status: {}, error: err.message }; }
+  if (root._agenda !== token) return; // the user moved on meanwhile
+
+  const when = (ev) => ev.allDay ? 'All day' : `${hm(new Date(ev.start))}–${hm(new Date(ev.end))}`;
+  let html = '';
+  for (let d = from; d < to; d = addDays(d, 1)) {
+    const evs = data.events.filter((ev) => onDay(ev, d))
+      .sort((a, b) => (a.allDay === b.allDay ? (a.start < b.start ? -1 : 1) : a.allDay ? -1 : 1));
+    const label = parseYmd(d).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' });
+    html += `<div class="ag-day ${d === today ? 'today' : ''} ${evs.length ? '' : 'free'}">
+      <div class="ag-date">${d === today ? 'Today · ' : d === addDays(today, 1) ? 'Tomorrow · ' : ''}${esc(label)}</div>
+      ${evs.length ? evs.map((ev) => {
+        const a = acctOf(ev.acct);
+        return `<div class="ev" style="--acct:${a.color}"><span class="bar"></span><span class="t">${esc(when(ev))}</span>
+          <span class="what"><div>${esc(ev.title)}</div><div>${esc([ev.location, /^(calendar|my calendar|calendrier)$/i.test(ev.calendar || '') || ev.calendar === a.email ? '' : ev.calendar, acctLabel(a)].filter(Boolean).join(' · '))}</div></span></div>`;
+      }).join('') : '<div class="ag-free">Nothing scheduled</div>'}
+    </div>`;
+  }
+  const notes = Object.entries(data.status || {}).filter(([, v]) => v.error)
+    .map(([id, v]) => `<div class="cal-note bad">${esc(acctLabel(acctOf(id)))}: ${esc(v.error)}</div>`).join('')
+    + (data.error ? `<div class="cal-note bad">${esc(data.error)}</div>` : '');
+  root.innerHTML = `${top}<div class="reader-body"><div class="reader-inner">${notes}${html}</div></div>`;
+  wire();
 }
 
 function repliedBar(m) {
@@ -1276,6 +1351,7 @@ async function openSettings() {
   });
 }
 $('#settingsBtn').onclick = openSettings;
+$('#calBtn').onclick = openAgenda;
 $('#viewToggle').addEventListener('click', (e) => { const b = e.target.closest('[data-v]'); if (b) setView(b.dataset.v); });
 setView(state.view);
 $('#refreshBtn').onclick = () => loadFeed(true);
