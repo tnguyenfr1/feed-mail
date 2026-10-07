@@ -6,17 +6,20 @@ import nodemailer from 'nodemailer';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import { serversFor } from './providers.js';
 import { parseInvite, findDates } from './calendar.js';
+import { accessToken } from './google.js';
 
 const FEED_SIZE = 50; // newest messages per account
 const PREVIEW_BYTES = 20000; // enough of each message to build a preview
 
 const clients = new Map(); // account id -> Promise<ImapFlow>
 
-function newClient(acct) {
+async function newClient(acct) {
   const { imap } = serversFor(acct);
   const c = new ImapFlow({
     ...imap,
-    auth: { user: acct.email, pass: acct.password },
+    auth: acct.oauth
+      ? { user: acct.email, accessToken: await accessToken(acct) }
+      : { user: acct.email, pass: acct.password },
     logger: false,
     emitLogs: false,
   });
@@ -32,7 +35,7 @@ async function getClient(acct) {
     clients.delete(acct.id);
   }
   const p = (async () => {
-    const c = newClient(acct);
+    const c = await newClient(acct);
     await c.connect();
     c.on('close', () => {
       if (clients.get(acct.id) === p) clients.delete(acct.id);
@@ -80,6 +83,14 @@ async function withInbox(acct, fn, { fresh = false } = {}, retried = false) {
   }
 }
 
+async function smtpTransport(acct) {
+  const { smtp } = serversFor(acct);
+  const auth = acct.oauth
+    ? { type: 'OAuth2', user: acct.email, accessToken: await accessToken(acct) }
+    : { user: acct.email, pass: acct.password };
+  return nodemailer.createTransport({ ...smtp, auth });
+}
+
 function friendly(err) {
   if (err.authenticationFailed || /AUTHENTICATIONFAILED|Invalid credentials|LOGIN failed/i.test(err.responseText || err.message)) {
     const e = new Error('Login refused: check the email address and app password, and that IMAP is switched on.');
@@ -90,7 +101,7 @@ function friendly(err) {
 }
 
 export async function testLogin(acct) {
-  const c = newClient(acct);
+  const c = await newClient(acct);
   try {
     await c.connect();
     const status = await c.status('INBOX', { messages: true });
@@ -238,7 +249,7 @@ export async function sendInviteReply(acct, parsed, icsReply, label) {
     icalEvent: { method: 'REPLY', content: icsReply },
   };
   const raw = await new MailComposer(mail).compile().build();
-  const transport = nodemailer.createTransport({ ...servers.smtp, auth: { user: acct.email, pass: acct.password } });
+  const transport = await smtpTransport(acct);
   try {
     await transport.sendMail({ envelope: { from: acct.email, to: [to] }, raw });
   } catch (err) {
@@ -314,7 +325,7 @@ export async function sendReply(acct, uid, { body, all, attachments = [] }) {
   };
 
   const raw = await new MailComposer(mail).compile().build();
-  const transport = nodemailer.createTransport({ ...servers.smtp, auth: { user: acct.email, pass: acct.password } });
+  const transport = await smtpTransport(acct);
   try {
     await transport.sendMail({
       envelope: { from: acct.email, to: [...to, ...cc].map((a) => a.address) },

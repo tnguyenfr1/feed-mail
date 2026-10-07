@@ -15,6 +15,13 @@ export const PROVIDERS = {
     smtp: { host: 'smtp.aol.com', port: 465, secure: true },
     appendSent: false,
   },
+  gmail: {
+    label: 'Gmail',
+    imap: { host: 'imap.gmail.com', port: 993, secure: true },
+    smtp: { host: 'smtp.gmail.com', port: 465, secure: true },
+    appendSent: false, // Gmail files sent mail itself
+    oauth: 'google',
+  },
   gmx: {
     label: 'GMX',
     imap: { host: 'imap.gmx.com', port: 993, secure: true },
@@ -49,4 +56,10 @@ export function serversFor(account) {
     }
   }
   return s;
+}
+
+// Calendar backend for an account: 'caldav', 'google', or null.
+export function calendarKind(account) {
+  if (PROVIDERS[account.provider]?.oauth === 'google') return 'google';
+  return caldavUrlFor(account) ? 'caldav' : null;
 }

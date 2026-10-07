@@ -1,9 +1,10 @@
 import crypto from 'node:crypto';
 import express from 'express';
 import { loadAccounts, saveAccounts, loadConfig, saveConfig } from './store.js';
-import { PROVIDERS, caldavUrlFor } from './providers.js';
+import { PROVIDERS, caldavUrlFor, calendarKind } from './providers.js';
 import * as mail from './mail.js';
 import * as cal from './calendar.js';
+import * as google from './google.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -88,11 +89,66 @@ app.post('/api/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- Google sign-in (browser redirects, so outside /api) ----------
+
+const googleRedirect = (req) =>
+  `https://${process.env.PUBLIC_HOST || req.headers['x-forwarded-host'] || req.headers.host}/oauth/google/callback`;
+
+app.get('/oauth/google/start', (req, res) => {
+  if (!loggedIn(req) || !google.googleConfigured()) return res.redirect('/');
+  const state = crypto.randomBytes(16).toString('hex');
+  // Lax so the cookie survives the trip to Google and back; the session cookie is Strict.
+  res.cookie('fm_oauth', state, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 15 * 60 * 1000, path: '/oauth' });
+  res.redirect(google.authUrl(googleRedirect(req), state));
+});
+
+app.get('/oauth/google/callback', async (req, res) => {
+  const back = (msg) => res.type('html').send(
+    `<!doctype html><meta charset="utf-8"><script>location.replace(${JSON.stringify('/?' + msg)})</script>`);
+  const state = readCookie(req, 'fm_oauth');
+  res.clearCookie('fm_oauth', { path: '/oauth' });
+  if (!state || state !== req.query.state) return back('oauthError=' + encodeURIComponent('Sign-in expired, please try again.'));
+  if (req.query.error) return back('oauthError=' + encodeURIComponent('Google sign-in was cancelled.'));
+  try {
+    const { email, refreshToken } = await google.exchangeCode(String(req.query.code || ''), googleRedirect(req));
+    const existing = accounts.find((a) => a.provider === 'gmail' && a.email.toLowerCase() === email.toLowerCase());
+    const COLORS = ['#ea4335', '#3b6cf6', '#16a34a', '#ca8a04', '#7c3aed'];
+    const acct = existing
+      ? { ...existing, oauth: { refreshToken } }
+      : { id: crypto.randomBytes(4).toString('hex'), provider: 'gmail', email, oauth: { refreshToken }, name: '',
+          color: COLORS[accounts.filter((a) => a.provider === 'gmail').length % COLORS.length] };
+    mail.dropClient(acct.id);
+    google.forgetToken(acct.id);
+    cal.forgetCalendar(acct.id);
+    await mail.testLogin(acct);
+    if (existing) Object.assign(existing, acct);
+    else accounts.push(acct);
+    saveAccounts(accounts);
+    back('added=' + encodeURIComponent(email));
+  } catch (err) {
+    console.error('google callback', err.message);
+    back('oauthError=' + encodeURIComponent(err.message));
+  }
+});
+
 app.use('/api', (req, res, next) => (loggedIn(req) ? next() : res.status(401).json({ error: 'Not logged in' })));
+
+app.get('/api/google', (req, res) => res.json({ configured: google.googleConfigured(), redirectUri: googleRedirect(req) }));
+
+app.post('/api/google', (req, res) => {
+  const clientId = String(req.body.clientId || '').trim();
+  const clientSecret = String(req.body.clientSecret || '').trim();
+  if (!/\.apps\.googleusercontent\.com$/.test(clientId)) return res.status(400).json({ error: 'The Client ID should end with .apps.googleusercontent.com' });
+  if (clientSecret.length < 10) return res.status(400).json({ error: 'Paste the Client secret too.' });
+  google.setGoogleClient(clientId, clientSecret);
+  res.json({ ok: true });
+});
 
 // ---------- accounts ----------
 
-const publicAccount = ({ password, calPassword, ...a }) => ({ ...a, hasCalPassword: !!calPassword, calendar: !!caldavUrlFor(a) });
+const publicAccount = ({ password, calPassword, oauth, ...a }) => ({
+  ...a, hasCalPassword: !!calPassword, calendar: !!calendarKind(a), calPasswordAllowed: !!caldavUrlFor(a),
+});
 const findAccount = (id) => {
   const a = accounts.find((x) => x.id === id);
   if (!a) throw Object.assign(new Error('Unknown account'), { status: 404 });
@@ -100,7 +156,7 @@ const findAccount = (id) => {
 };
 
 app.get('/api/providers', (req, res) => {
-  res.json(Object.entries(PROVIDERS).map(([id, p]) => ({ id, label: p.label })));
+  res.json(Object.entries(PROVIDERS).map(([id, p]) => ({ id, label: p.label, oauth: p.oauth || null })));
 });
 
 app.get('/api/accounts', (req, res) => res.json(accounts.map(publicAccount)));
@@ -108,7 +164,7 @@ app.get('/api/accounts', (req, res) => res.json(accounts.map(publicAccount)));
 app.post('/api/accounts', async (req, res, next) => {
   try {
     const { provider, email, password, name, color } = req.body;
-    if (!PROVIDERS[provider]) return res.status(400).json({ error: 'Pick a provider.' });
+    if (!PROVIDERS[provider] || PROVIDERS[provider].oauth) return res.status(400).json({ error: 'Pick a provider.' });
     if (!/^\S+@\S+\.\S+$/.test(email || '')) return res.status(400).json({ error: 'Enter a valid email address.' });
     if (!password) return res.status(400).json({ error: 'Enter the app password.' });
     const acct = {
@@ -146,6 +202,7 @@ app.delete('/api/accounts/:id', (req, res, next) => {
     saveAccounts(accounts);
     mail.dropClient(req.params.id);
     cal.forgetCalendar(req.params.id);
+    google.forgetToken(req.params.id);
     cache.delete(req.params.id);
     res.json({ ok: true });
   } catch (err) { next(err); }
@@ -250,7 +307,7 @@ app.get('/api/calendar', async (req, res, next) => {
     if (isNaN(from) || isNaN(to) || to <= from || to - from > 62 * 864e5) return res.status(400).json({ error: 'Bad date range' });
     const events = [];
     const status = {};
-    await Promise.all(accounts.filter((a) => caldavUrlFor(a)).map(async (a) => {
+    await Promise.all(accounts.filter((a) => calendarKind(a)).map(async (a) => {
       try {
         events.push(...await cal.fetchEvents(a, from, to));
         status[a.id] = { ok: true };
@@ -271,9 +328,12 @@ app.post('/api/msg/:acct/:uid/rsvp', async (req, res, next) => {
     if (!RSVP[partstat]) return res.status(400).json({ error: 'Bad response' });
     const acct = findAccount(req.params.acct);
     const { ics, parsed } = await mail.getInviteIcs(acct, req.params.uid);
+    if (await cal.rsvpViaProvider(acct, ics, partstat).catch(() => false)) {
+      return res.json({ ok: true, savedTo: 'Google Calendar', calendarError: null });
+    }
     await mail.sendInviteReply(acct, parsed, cal.buildReply(ics, acct.email, partstat), RSVP[partstat]);
     let savedTo = null, calendarError = null;
-    if (partstat !== 'DECLINED' && caldavUrlFor(acct)) {
+    if (partstat !== 'DECLINED' && calendarKind(acct)) {
       try { savedTo = await cal.addToCalendar(acct, ics, partstat); } catch (err) { calendarError = err.message; }
     }
     res.json({ ok: true, savedTo, calendarError });

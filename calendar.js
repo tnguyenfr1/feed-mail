@@ -3,7 +3,8 @@
 import { createDAVClient } from 'tsdav';
 import ICAL from 'ical.js';
 import * as chrono from 'chrono-node';
-import { caldavUrlFor } from './providers.js';
+import { caldavUrlFor, calendarKind } from './providers.js';
+import { googleEvents, googleCalendars, googleRsvp, googleImport } from './google.js';
 
 const CAL_LIST_MS = 30 * 60 * 1000;
 const EVENTS_MS = 2 * 60 * 1000;
@@ -129,6 +130,12 @@ export async function fetchEvents(acct, from, to) {
   const hit = eventCache.get(key);
   if (hit && Date.now() - hit.at < EVENTS_MS) return hit.events;
 
+  if (calendarKind(acct) === 'google') {
+    const events = (await googleEvents(acct, from, to)).map((ev) => ({ ...ev, acct: acct.id }));
+    eventCache.set(key, { at: Date.now(), events });
+    return events;
+  }
+
   const { client, calendars } = await getCal(acct);
   const events = [];
   // Ask the server for a slightly wider window so recurring masters are included.
@@ -207,8 +214,30 @@ export function buildReply(ics, email, partstat) {
   return cal.toString();
 }
 
-// Save the invited event into this account's first calendar.
+// Google accounts: answer in Google Calendar directly when the invite is
+// already there. Returns true when Google will notify the organizer itself.
+export async function rsvpViaProvider(acct, ics, partstat) {
+  if (calendarKind(acct) !== 'google') return false;
+  const invite = parseInvite(ics);
+  const done = invite && await googleRsvp(acct, invite, partstat);
+  if (done) forgetCalendar(acct.id);
+  return done;
+}
+
+export async function testGoogleCalendar(acct) {
+  return (await googleCalendars(acct)).length;
+}
+
+// Save the invited event into this account's main calendar.
 export async function addToCalendar(acct, ics, partstat) {
+  if (calendarKind(acct) === 'google') {
+    const invite = parseInvite(ics);
+    const vevent = new ICAL.Component(ICAL.parse(ics)).getFirstSubcomponent('vevent');
+    const rrules = vevent.getAllProperties('rrule').map((p) => p.toICALString());
+    const name = await googleImport(acct, invite, rrules, partstat);
+    forgetCalendar(acct.id);
+    return name;
+  }
   const { client, calendars } = await getCal(acct);
   if (!calendars.length) throw new Error('No calendar found in this account.');
   const root = new ICAL.Component(ICAL.parse(ics));

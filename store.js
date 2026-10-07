@@ -53,3 +53,14 @@ export function loadConfig() {
 export function saveConfig(cfg) {
   writePrivate(configFile, JSON.stringify(cfg, null, 2));
 }
+
+// App-level secrets such as OAuth client credentials (encrypted).
+const secretsFile = path.join(DATA, 'secrets.enc');
+
+export function loadSecrets() {
+  return fs.existsSync(secretsFile) ? decrypt(fs.readFileSync(secretsFile)) : {};
+}
+
+export function saveSecrets(secrets) {
+  writePrivate(secretsFile, encrypt(secrets));
+}

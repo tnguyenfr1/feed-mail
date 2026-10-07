@@ -314,6 +314,10 @@ async function boot() {
 }
 
 async function startApp() {
+  const params = new URLSearchParams(location.search);
+  if (params.has('added')) toast(`Connected ✓ ${params.get('added')}`);
+  if (params.has('oauthError')) toast(params.get('oauthError'));
+  if (location.search) history.replaceState(null, '', '/');
   $('#login').classList.add('hidden');
   $('#app').classList.remove('hidden');
   state.accounts = await api('/accounts');
@@ -705,9 +709,11 @@ async function openSettings() {
   back.innerHTML = `<div class="sheet" role="dialog" aria-label="Accounts">
     <div style="display:flex;align-items:center"><h2 style="flex:1">Accounts</h2><button class="icon-btn" data-close aria-label="Close">✕</button></div>
     <div id="acctList"></div>
-    <h3>Add an account</h3>
+    <h3>Gmail + Google Calendar</h3>
+    <div id="googleBox"></div>
+    <h3>Add another account</h3>
     <form id="addForm">
-      <label class="field"><span>Provider</span><select name="provider">${providers.map((p) => `<option value="${p.id}">${esc(p.label)}</option>`).join('')}</select></label>
+      <label class="field"><span>Provider</span><select name="provider">${providers.filter((p) => !p.oauth).map((p) => `<option value="${p.id}">${esc(p.label)}</option>`).join('')}</select></label>
       <div class="hint" id="provHint"></div>
       <label class="field"><span>Email address</span><input name="email" type="email" autocomplete="off" required></label>
       <label class="field"><span>App password</span><input name="password" type="password" autocomplete="new-password" required></label>
@@ -730,12 +736,39 @@ async function openSettings() {
   const hint = () => { $('#provHint', back).innerHTML = HINTS[sel.value] || ''; };
   sel.onchange = hint; hint();
 
+  const googleBox = async (forceForm = false) => {
+    const g = await api('/google');
+    const box = $('#googleBox', back);
+    if (g.configured && !forceForm) {
+      box.innerHTML = `<a class="btn wide" style="display:block;text-align:center;text-decoration:none" href="/oauth/google/start">Sign in with Google</a>
+        <p class="sub" style="margin-top:8px">Connects a Gmail inbox and its Google Calendar. Google will warn that the app isn't verified: choose <b>Advanced → Go to Feed Mail</b>. <a href="#" data-gkeys style="color:var(--accent)">Change Google keys</a></p>`;
+      return;
+    }
+    box.innerHTML = `<div class="hint">One-time setup: paste the <b>Client ID</b> and <b>Client secret</b> from your Google Cloud project.
+        The redirect URI there must be exactly:<br><code style="word-break:break-all">${esc(g.redirectUri)}</code></div>
+      <form id="gForm">
+        <label class="field"><span>Client ID</span><input name="clientId" autocomplete="off" placeholder="….apps.googleusercontent.com" required></label>
+        <label class="field"><span>Client secret</span><input name="clientSecret" type="password" autocomplete="off" required></label>
+        <div class="err" id="gErr"></div>
+        <button class="btn wide">Save Google keys</button>
+      </form>`;
+    $('#gForm', box).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await api('/google', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) });
+        toast('Google keys saved ✓'); googleBox();
+      } catch (err) { $('#gErr', box).textContent = err.message; }
+    });
+  };
+  googleBox();
+
   const list = () => {
     $('#acctList', back).innerHTML = state.accounts.length
       ? state.accounts.map((a) => `<div class="acct-row"><span class="chip"><span class="dot" style="background:${a.color}"></span></span>
           <div class="info"><div>${esc(acctLabel(a))}</div><div>${esc(a.email)} · ${esc(a.provider.toUpperCase())}</div></div>
           <button class="btn danger" data-del="${a.id}">Remove</button></div>
-          ${a.calendar ? `<form class="calpw" data-acct="${a.id}" style="display:flex;gap:8px;padding:8px 0 4px;align-items:center">
+          ${a.provider === 'gmail' ? `<div style="padding:4px 0 6px"><a class="btn ghost" style="padding:6px 12px;font-size:13px;text-decoration:none;display:inline-block" href="/oauth/google/start">Reconnect Google</a></div>` : ''}
+          ${a.calPasswordAllowed ? `<form class="calpw" data-acct="${a.id}" style="display:flex;gap:8px;padding:8px 0 4px;align-items:center">
             <input type="password" name="calPassword" autocomplete="new-password" placeholder="${a.hasCalPassword ? 'Calendar password saved ✓ (type to change)' : 'Calendar password (only if different)'}"
               style="flex:1;min-width:0;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg)">
             <button class="btn ghost" style="padding:8px 12px">Save</button></form>` : ''}`).join('')
@@ -756,6 +789,7 @@ async function openSettings() {
       list(); renderChips(); renderFeed();
       return;
     }
+    if (e.target.closest('[data-gkeys]')) { e.preventDefault(); googleBox(true); return; }
     if (e.target.closest('[data-logout]')) { await api('/logout', { method: 'POST' }); location.reload(); }
   });
 
