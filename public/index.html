@@ -220,6 +220,31 @@ header.top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.01em; }
 .replied-bar .btn { padding: 4px 10px; font-size: 13px; }
 .my-reply { flex-basis: 100%; white-space: pre-wrap; word-break: break-word; color: var(--ink); font-weight: 400;
   border-left: 3px solid var(--ok); padding: 4px 0 4px 10px; margin-top: 4px; }
+/* ---------- view toggle + conversation ---------- */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--card); }
+.seg button { border: 0; background: none; padding: 7px 10px; font-size: 13px; color: var(--muted); }
+.seg button.on { background: var(--ink); color: var(--bg); }
+@media (max-width: 420px) { .seg button { padding: 7px 8px; font-size: 12px; } header.top h1 { font-size: 19px; } }
+.cnt { display: inline-block; font-size: 11px; font-weight: 700; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 999px; padding: 0 6px; margin-left: 4px; vertical-align: 1px; }
+.tmsg { background: var(--card); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; }
+.tmsg.mine { background: color-mix(in srgb, var(--accent) 6%, var(--card)); }
+.tmsg.target { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.tm-head { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; cursor: pointer; }
+.tm-head .avatar { width: 32px; height: 32px; font-size: 12px; }
+.tm-who { flex: 1; min-width: 0; font-size: 14px; }
+.tm-who .muted, .tm-to { color: var(--muted); font-size: 13px; }
+.tm-prev { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-when { flex: none; font-size: 12px; color: var(--muted); }
+.tm-body { padding: 0 12px 4px; }
+.tm-to { margin-bottom: 10px; word-break: break-word; }
+.tm-actions { display: flex; gap: 8px; padding: 6px 12px 12px; flex-wrap: wrap; align-items: center; }
+.tm-actions .btn { padding: 6px 12px; font-size: 13px; }
+.tm-actions .spacer { flex: 1; }
+.reply-target { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--accent); margin-bottom: 6px; }
+.reply-target:empty { display: none; }
+.reply-target span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-target .x { border: 0; background: none; color: var(--muted); font-size: 15px; padding: 0 4px; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
 </style>
@@ -243,6 +268,9 @@ header.top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.01em; }
   <section class="feed-col">
     <header class="top">
       <h1>Feed</h1>
+      <div class="seg" id="viewToggle" role="group" aria-label="View">
+        <button data-v="conv">Conversations</button><button data-v="all">All</button>
+      </div>
       <button class="icon-btn" id="refreshBtn" title="Refresh" aria-label="Refresh">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
       </button>
@@ -389,27 +417,67 @@ function dayLabel(iso) {
   return d.toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
-function renderFeed() {
+// ---------- feed (conversations or every email) ----------
+const viewKey = 'fm_view';
+try { state.view = localStorage.getItem(viewKey) || 'conv'; } catch { state.view = 'conv'; }
+
+function setView(v) {
+  state.view = v;
+  try { localStorage.setItem(viewKey, v); } catch {}
+  $('#viewToggle').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+  renderFeed();
+}
+
+// Turn the flat list of inbox emails into feed entries.
+function feedEntries() {
   const items = state.items.filter((i) => state.filter === 'all' || i.acct === state.filter);
+  if (state.view !== 'conv') return items.map((it) => ({ key: it.id, latest: it, items: [it] }));
+  const groups = new Map();
+  for (const it of items) {
+    const k = `${it.acct}|${it.thread || it.uid}`;
+    if (!groups.has(k)) groups.set(k, { key: 'c:' + k, items: [] });
+    groups.get(k).items.push(it);
+  }
+  const out = [...groups.values()];
+  for (const g of out) {
+    g.items.sort((a, b) => (a.date < b.date ? 1 : -1));
+    g.latest = g.items[0];
+  }
+  return out.sort((a, b) => (a.latest.date < b.latest.date ? 1 : -1));
+}
+
+const shortName = (p) => (p?.name || p?.address || '?').split(/[\s@]/)[0];
+
+function renderFeed() {
   if (!state.accounts.length) {
     $('#feed').innerHTML = `<div class="empty">No accounts yet.<br><br><button class="btn" onclick="openSettings()">Add an email account</button></div>`;
     return;
   }
-  if (!items.length) { $('#feed').innerHTML = `<div class="empty">${state.loading ? 'Loading…' : 'Nothing here.'}</div>`; return; }
+  const entries = feedEntries();
+  if (!entries.length) { $('#feed').innerHTML = `<div class="empty">${state.loading ? 'Loading…' : 'Nothing here.'}</div>`; return; }
   let html = '', lastDay = '';
-  for (const it of items) {
+  for (const g of entries) {
+    const it = g.latest;
     const day = dayLabel(it.date);
     if (day !== lastDay) { html += `<div class="day">${esc(day)}</div>`; lastDay = day; }
     const a = acctOf(it.acct);
-    const active = state.current && state.current.acct === it.acct && state.current.uid === it.uid;
-    html += `<button class="card ${it.seen ? '' : 'unread'} ${active ? 'active' : ''}" style="--acct:${a.color}" data-id="${esc(it.id)}">
+    const unread = g.items.some((x) => !x.seen);
+    const mine = state.view === 'conv' ? it.threadSent : null;
+    const count = g.items.length + (mine?.count || 0);
+    const active = state.current && state.current.key === g.key;
+    // Replied: my latest message in the conversation is newer than theirs.
+    const repliedAt = mine?.lastAt && mine.lastAt > it.date ? mine.lastAt : it.replied ? it.replied.at || '' : null;
+    const people = state.view === 'conv' && count > 1
+      ? [...new Set([...g.items.map((x) => shortName(x.from)), ...(mine ? ['me'] : [])])].slice(0, 3).join(', ')
+      : (it.from?.name || it.from?.address || 'Unknown');
+    html += `<button class="card ${unread ? 'unread' : ''} ${active ? 'active' : ''}" style="--acct:${a.color}" data-key="${esc(g.key)}">
       <div class="row">
         <div class="avatar">${esc(initials(it.from))}</div>
-        <div class="who"><div class="name">${esc(it.from?.name || it.from?.address || 'Unknown')}</div>
+        <div class="who"><div class="name">${esc(people)}${count > 1 ? ` <span class="cnt">${count}</span>` : ''}</div>
           <div class="acct">to ${esc(acctLabel(a))}</div></div>
         <div class="when">${esc(fmtWhen(it.date))}</div>
       </div>
-      <div class="subject">${it.replied ? `<span class="rp">↩ Replied${it.replied.at ? ' · ' + esc(fmtWhen(it.replied.at)) : ''}</span>` : ''}${esc(it.subject)}<span class="tags">${it.attach ? '📎' : ''}</span></div>
+      <div class="subject">${repliedAt !== null ? `<span class="rp">↩ Replied${repliedAt ? ' · ' + esc(fmtWhen(repliedAt)) : ''}</span>` : ''}${esc(it.subject)}<span class="tags">${g.items.some((x) => x.attach) ? '📎' : ''}</span></div>
       ${it.preview ? `<div class="preview">${esc(it.preview)}</div>` : ''}
     </button>`;
   }
@@ -417,31 +485,42 @@ function renderFeed() {
 }
 $('#feed').addEventListener('click', (e) => {
   const c = e.target.closest('.card'); if (!c) return;
-  const it = state.items.find((i) => i.id === c.dataset.id);
-  if (it) openMessage(it);
+  const g = feedEntries().find((x) => x.key === c.dataset.key);
+  if (g) openConversation(g);
 });
 
-// ---------- reader ----------
+// ---------- reader: a conversation (one or more messages) ----------
 const linkify = (s) => esc(s).replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
 const fmtAddr = (a) => a ? (a.name ? `${a.name} <${a.address}>` : a.address) : '';
 const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+const fmtLong = (iso) => new Date(iso).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const msgUrl = (m, extra = '') => `/msg/${m.acct}/${m.uid}${extra}${m.box === 'sent' ? '?box=sent' : ''}`;
 
-async function openMessage(it) {
-  state.current = { acct: it.acct, uid: it.uid };
+async function openConversation(g) {
+  const latest = g.latest;
+  const conv = { key: g.key, acct: latest.acct, msgs: [], target: null, calSet: false };
+  state.current = conv;
   const r = $('#reader');
   r.classList.add('open');
   r.innerHTML = `<div class="reader-top"><button class="icon-btn back" aria-label="Back">←</button><div class="spacer"></div></div>
     <div class="reader-body"><div class="reader-inner"><p style="color:var(--muted)">Loading…</p></div></div>`;
   $('.back', r).onclick = closeReader;
-  if (!it.seen) { it.seen = true; renderChips(); }
-  renderFeed();
-  try {
-    const msg = await api(`/msg/${it.acct}/${it.uid}`);
-    if (!state.current || state.current.uid !== it.uid || state.current.acct !== it.acct) return;
-    renderMessage(msg, false);
-  } catch (err) {
-    $('.reader-inner', r).innerHTML = `<p class="err">${esc(err.message)}</p>`;
+  const wasUnread = g.items.filter((x) => !x.seen);
+  for (const x of g.items) x.seen = true;
+  renderChips(); renderFeed();
+
+  let list = g.items.slice().reverse().map((x) => ({ ...x, box: 'inbox' }));
+  if (state.view === 'conv' && (g.items.length > 1 || latest.threadSent)) {
+    try { list = await api(`/thread/${latest.acct}/${encodeURIComponent(latest.thread)}`); } catch {}
   }
+  if (state.current !== conv) return;
+  const unreadUids = new Set(wasUnread.map((x) => x.uid));
+  conv.msgs = list.map((m, i) => ({
+    meta: m, full: null, showImages: false,
+    open: i === list.length - 1 || (m.box === 'inbox' && unreadUids.has(m.uid)),
+  }));
+  conv.target = conv.msgs[conv.msgs.length - 1];
+  renderConversation(conv);
 }
 
 function closeReader() {
@@ -451,13 +530,11 @@ function closeReader() {
   renderFeed();
 }
 
-function repliedBar(msg) {
-  if (!msg.replied) return '';
-  const when = msg.replied.at
-    ? new Date(msg.replied.at).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
-    : '';
-  return `<div class="replied-bar">↩ You replied${when ? ' on ' + esc(when) : ''}
-    ${msg.replied.uid ? `<button class="btn ghost" data-act="myreply">Show my reply</button>` : ''}</div>`;
+function repliedBar(m) {
+  if (!m.full?.replied) return '';
+  const at = m.full.replied.at;
+  return `<div class="replied-bar">↩ You replied${at ? ' on ' + esc(fmtLong(at)) : ''}
+    ${m.full.replied.uid ? `<button class="btn ghost" data-act="myreply">Show my reply</button>` : ''}</div>`;
 }
 
 function frameDoc(html, showImages) {
@@ -469,59 +546,121 @@ function frameDoc(html, showImages) {
     </head><body>${html}</body></html>`;
 }
 
-function renderMessage(msg, showImages) {
-  const a = acctOf(msg.acct);
-  const hasRemote = msg.html && /<img[^>]+src=["']?https?:/i.test(msg.html);
+const isMe = (conv, m) => m.meta.box === 'sent';
+const recipientsOf = (m) => (m.full ? [...m.full.to, ...m.full.cc] : m.meta.to || []);
+
+function messageHtml(conv, m, idx) {
+  const a = acctOf(conv.acct);
+  const meta = m.meta;
+  const who = isMe(conv, m) ? 'Me' : (meta.from?.name || meta.from?.address || 'Unknown');
+  const isTarget = conv.target === m;
+  const head = `<div class="tm-head" data-toggle="${idx}">
+      <div class="avatar" style="--acct:${isMe(conv, m) ? 'var(--muted)' : a.color}">${esc(isMe(conv, m) ? 'Me' : initials(meta.from))}</div>
+      <div class="tm-who"><b>${esc(who)}</b>${isMe(conv, m) && meta.to?.length ? ` <span class="muted">to ${esc(meta.to.map(shortName).join(', '))}</span>` : ''}
+        ${m.open ? '' : `<div class="tm-prev">${esc(meta.preview || '')}</div>`}</div>
+      <div class="tm-when">${esc(fmtLong(meta.date))}</div>
+    </div>`;
+  if (!m.open) return `<div class="tmsg ${isMe(conv, m) ? 'mine' : ''} ${isTarget ? 'target' : ''}" data-idx="${idx}">${head}</div>`;
+
+  let body;
+  if (!m.full) body = `<p class="muted" style="padding:4px 0">Loading…</p>`;
+  else if (m.full.error) body = `<p class="err">${esc(m.full.error)}</p>`;
+  else {
+    const f = m.full;
+    const hasRemote = f.html && /<img[^>]+src=["']?https?:/i.test(f.html);
+    body = `<div class="muted tm-to">to ${esc(f.to.map(fmtAddr).join(', '))}${f.cc.length ? ' · cc ' + esc(f.cc.map(fmtAddr).join(', ')) : ''}</div>
+      ${conv.msgs.length === 1 ? repliedBar(m) : ''}
+      ${hasRemote && !m.showImages ? `<div class="img-note">Images from the internet are hidden to protect your privacy.<button class="btn ghost" data-act="images" data-idx="${idx}">Show images</button></div>` : ''}
+      ${f.html
+        ? `<div class="msg-frame-wrap"><iframe class="msg-frame" data-frame="${idx}" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe></div>`
+        : `<div class="msg-text">${linkify(f.text)}</div>`}
+      ${f.attachments.length ? `<div class="atts">${f.attachments.map((x) =>
+        `<a class="att" href="/api${msgUrl(f, '/att/' + x.idx)}">📎 ${esc(x.filename)} <span style="color:var(--muted)">${fmtSize(x.size)}</span></a>`).join('')}</div>` : ''}`;
+  }
+  const many = recipientsOf(m).length > 1;
+  const actions = m.full && !m.full.error ? `<div class="tm-actions">
+      <button class="btn ghost" data-act="replyto" data-idx="${idx}">↩ Reply</button>
+      ${many ? `<button class="btn ghost" data-act="replyall" data-idx="${idx}">↩ Reply all</button>` : ''}
+      ${m.meta.box === 'inbox' && m.meta.uid ? `<span class="spacer"></span><button class="btn danger" data-act="delete" data-idx="${idx}">Delete</button>` : ''}
+    </div>` : '';
+  return `<div class="tmsg open ${isMe(conv, m) ? 'mine' : ''} ${isTarget ? 'target' : ''}" data-idx="${idx}">${head}<div class="tm-body">${body}</div>${actions}</div>`;
+}
+
+function renderConversation(conv) {
   const hasCal = state.accounts.some((x) => x.calendar);
   const r = $('#reader');
+  const subject = conv.msgs[conv.msgs.length - 1]?.meta.subject || '';
   r.innerHTML = `
     <div class="reader-top">
       <button class="icon-btn back" aria-label="Back">←</button>
       <div class="spacer"></div>
       <button class="btn ghost" data-act="unread">Mark unread</button>
-      <button class="btn danger" data-act="delete">Delete</button>
     </div>
     <div class="reader-body"><div class="reader-inner ${hasCal ? 'wide' : ''}"><div class="reader-grid"><div class="msg-col">
-      <h2>${esc(msg.subject)}</h2>
-      <div class="meta">
-        <div class="avatar" style="--acct:${a.color}">${esc(initials(msg.from))}</div>
-        <div class="lines">
-          <div><b>${esc(msg.from?.name || msg.from?.address || '')}</b> <span class="muted">${esc(msg.from?.name ? msg.from.address : '')}</span></div>
-          <div class="muted">to ${esc(msg.to.map(fmtAddr).join(', ') || acctLabel(a))}${msg.cc.length ? ' · cc ' + esc(msg.cc.map(fmtAddr).join(', ')) : ''}</div>
-          <div class="muted">${esc(new Date(msg.date).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' }))} · in ${esc(acctLabel(a))}</div>
-        </div>
-      </div>
-      <div id="repliedSlot">${repliedBar(msg)}</div>
-      ${hasRemote && !showImages ? `<div class="img-note">Images from the internet are hidden to protect your privacy.<button class="btn ghost" data-act="images">Show images</button></div>` : ''}
-      ${msg.html
-        ? `<div class="msg-frame-wrap"><iframe class="msg-frame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe></div>`
-        : `<div class="msg-text">${linkify(msg.text)}</div>`}
-      ${msg.attachments.length ? `<div class="atts">${msg.attachments.map((x) =>
-        `<a class="att" href="/api/msg/${msg.acct}/${msg.uid}/att/${x.idx}">📎 ${esc(x.filename)} <span style="color:var(--muted)">${fmtSize(x.size)}</span></a>`).join('')}</div>` : ''}
+      <h2>${esc(subject)}</h2>
+      <div id="thread"></div>
     </div>${hasCal ? '<details class="cal" id="calPanel"></details>' : ''}</div></div></div>
     <div class="composer">
+      <div class="reply-target" id="replyTarget"></div>
       <textarea id="replyText" placeholder="Write a reply…"></textarea>
       <div class="files" id="replyFiles"></div>
       <div class="actions">
         <label class="btn ghost" style="padding:8px 12px" title="Attach files">📎 Attach<input type="file" id="replyFileInput" multiple hidden></label>
-        <div class="to" id="replyTo">Reply to ${esc(fmtAddr(msg.from))}</div>
-        ${msg.to.length + msg.cc.length > 1 ? `<label style="font-size:13px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="replyAll"> Reply all</label>` : ''}
+        <div class="to" id="replyTo"></div>
+        <label id="replyAllWrap" style="font-size:13px;display:none;gap:6px;align-items:center"><input type="checkbox" id="replyAll"> Reply all</label>
         <button class="btn" data-act="send">Send</button>
       </div>
     </div>`;
   $('.back', r).onclick = closeReader;
+  renderThread(conv);
+  setupComposer(conv);
+  for (const m of conv.msgs) if (m.open && !m.full) loadFull(conv, m);
+}
 
-  const frame = $('.msg-frame', r);
-  if (frame) {
+function renderThread(conv) {
+  const t = $('#thread');
+  if (!t) return;
+  t.innerHTML = conv.msgs.map((m, i) => messageHtml(conv, m, i)).join('');
+  t.querySelectorAll('[data-frame]').forEach((frame) => {
+    const m = conv.msgs[Number(frame.dataset.frame)];
     const fit = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 'px'; } catch {} };
     frame.addEventListener('load', () => {
       fit();
       frame.contentDocument?.querySelectorAll('img').forEach((img) => img.addEventListener('load', fit));
       setTimeout(fit, 500);
     });
-    frame.srcdoc = frameDoc(msg.html, showImages);
-  }
+    frame.srcdoc = frameDoc(m.full.html, m.showImages);
+  });
+  updateComposerTarget(conv);
+}
 
+async function loadFull(conv, m) {
+  if (!m.meta.uid) return;
+  try {
+    m.full = await api(msgUrl({ ...m.meta, acct: conv.acct }));
+  } catch (err) { m.full = { error: err.message }; }
+  if (state.current !== conv) return;
+  renderThread(conv);
+  // The calendar follows the newest message from someone else.
+  const newestInbox = [...conv.msgs].reverse().find((x) => x.meta.box === 'inbox' && x.full && !x.full.error);
+  if (newestInbox && !conv.calSet && $('#calPanel')) { conv.calSet = true; setupCalendar(newestInbox.full); }
+}
+
+function updateComposerTarget(conv) {
+  const m = conv.target;
+  if (!m || !$('#replyTarget')) return;
+  const last = conv.msgs[conv.msgs.length - 1];
+  const who = isMe(conv, m) ? `my message to ${(m.meta.to || []).map(shortName).join(', ')}` : shortName(m.meta.from);
+  $('#replyTarget').innerHTML = conv.msgs.length > 1
+    ? `<span>↩ Replying to <b>${esc(who)}</b> · ${esc(fmtLong(m.meta.date))}</span>${m !== last ? `<button class="x" data-act="untarget" aria-label="Reply to the latest message instead">✕</button>` : ''}`
+    : '';
+  const to = isMe(conv, m) ? (m.full?.to || m.meta.to || []) : [m.full?.from || m.meta.from].filter(Boolean);
+  $('#replyTo').textContent = `To ${to.map(fmtAddr).join(', ')}`;
+  $('#replyAllWrap').style.display = recipientsOf(m).length > 1 ? 'flex' : 'none';
+}
+
+function setupComposer(conv) {
+  const r = $('#reader');
   const files = [];
   const renderFiles = () => {
     $('#replyFiles').innerHTML = files.map((f, i) => `<div class="f"><span>📎 ${esc(f.name)}</span> <small style="color:var(--muted)">${fmtSize(f.size)}</small><button data-rmfile="${i}" aria-label="Remove">×</button></div>`).join('');
@@ -529,70 +668,105 @@ function renderMessage(msg, showImages) {
   $('#replyFileInput').addEventListener('change', (e) => {
     for (const f of e.target.files) files.push(f);
     e.target.value = '';
-    const total = files.reduce((n, f) => n + f.size, 0);
-    if (total > 20 * 1024 * 1024) toast('Attachments are over 20 MB in total; most mail servers will refuse them.');
+    if (files.reduce((n, f) => n + f.size, 0) > 20 * 1024 * 1024) toast('Attachments are over 20 MB in total; most mail servers will refuse them.');
     renderFiles();
   });
   $('#replyFiles').addEventListener('click', (e) => {
     const x = e.target.closest('[data-rmfile]'); if (!x) return;
     files.splice(Number(x.dataset.rmfile), 1); renderFiles();
   });
+  $('#replyText').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('[data-act="send"]', r).click();
+  });
 
   r.onclick = async (e) => {
+    const tog = e.target.closest('[data-toggle]');
+    if (tog && !e.target.closest('a,button')) {
+      const m = conv.msgs[Number(tog.dataset.toggle)];
+      m.open = !m.open;
+      renderThread(conv);
+      if (m.open && !m.full) loadFull(conv, m);
+      return;
+    }
     const b = e.target.closest('[data-act]'); if (!b) return;
     const act = b.dataset.act;
-    if (act === 'images') return renderMessage(msg, true);
+    const m = b.dataset.idx !== undefined ? conv.msgs[Number(b.dataset.idx)] : null;
+    if (act === 'images') { m.showImages = true; return renderThread(conv); }
+    if (act === 'replyto' || act === 'replyall') {
+      conv.target = m;
+      renderThread(conv);
+      $('#replyAll').checked = act === 'replyall';
+      $('#replyText').focus();
+      $('.composer').scrollIntoView({ block: 'end', behavior: 'smooth' });
+      return;
+    }
+    if (act === 'untarget') { conv.target = conv.msgs[conv.msgs.length - 1]; $('#replyAll').checked = false; return renderThread(conv); }
     if (act === 'myreply') {
       const bar = b.closest('.replied-bar');
       const open = $('.my-reply', bar);
       if (open) { open.remove(); b.textContent = 'Show my reply'; return; }
       b.disabled = true;
       try {
-        const r = await api(`/sent/${msg.acct}/${msg.replied.uid}`);
-        bar.insertAdjacentHTML('beforeend', `<div class="my-reply">${linkify(r.text || '(empty)')}</div>`);
+        const only = conv.msgs[0];
+        const rr = await api(`/sent/${conv.acct}/${only.full.replied.uid}`);
+        bar.insertAdjacentHTML('beforeend', `<div class="my-reply">${linkify(rr.text || '(empty)')}</div>`);
         b.textContent = 'Hide my reply';
       } catch (err) { toast(err.message); }
       b.disabled = false;
       return;
     }
     if (act === 'unread') {
-      await api(`/msg/${msg.acct}/${msg.uid}/seen`, { method: 'POST', body: { seen: false } }).catch((err) => toast(err.message));
-      const it = state.items.find((i) => i.acct === msg.acct && i.uid === msg.uid);
+      const latest = [...conv.msgs].reverse().find((x) => x.meta.box === 'inbox' && x.meta.uid);
+      if (!latest) return;
+      await api(`/msg/${conv.acct}/${latest.meta.uid}/seen`, { method: 'POST', body: { seen: false } }).catch((err) => toast(err.message));
+      const it = state.items.find((i) => i.acct === conv.acct && i.uid === latest.meta.uid);
       if (it) it.seen = false;
       renderChips(); closeReader(); return;
     }
     if (act === 'delete') {
+      if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Tap again to delete'; return; }
       b.disabled = true;
       try {
-        await api(`/msg/${msg.acct}/${msg.uid}`, { method: 'DELETE' });
-        state.items = state.items.filter((i) => !(i.acct === msg.acct && i.uid === msg.uid));
-        renderChips(); closeReader(); toast('Moved to Trash');
+        await api(`/msg/${conv.acct}/${m.meta.uid}`, { method: 'DELETE' });
+        state.items = state.items.filter((i) => !(i.acct === conv.acct && i.uid === m.meta.uid));
+        conv.msgs = conv.msgs.filter((x) => x !== m);
+        renderChips(); toast('Moved to Trash');
+        if (!conv.msgs.length) return closeReader();
+        if (conv.target === m) conv.target = conv.msgs[conv.msgs.length - 1];
+        renderThread(conv); renderFeed();
       } catch (err) { toast(err.message); b.disabled = false; }
       return;
     }
     if (act === 'send') {
       const body = $('#replyText').value.trim();
       if (!body) return $('#replyText').focus();
+      const t = conv.target;
       b.disabled = true; b.textContent = 'Sending…';
       try {
         const attachments = await Promise.all(files.map(async (f) => ({ filename: f.name, contentType: f.type, data: await fileToBase64(f) })));
-        await api(`/msg/${msg.acct}/${msg.uid}/reply`, { method: 'POST', body: { body, all: !!$('#replyAll')?.checked, attachments } });
+        await api(`/msg/${conv.acct}/${t.meta.uid}/reply${t.meta.box === 'sent' ? '?box=sent' : ''}`,
+          { method: 'POST', body: { body, all: !!$('#replyAll').checked, attachments } });
         $('#replyText').value = '';
         files.length = 0; renderFiles();
-        const it = state.items.find((i) => i.acct === msg.acct && i.uid === msg.uid);
-        msg.replied = { at: new Date().toISOString(), uid: null };
-        if (it) { it.answered = true; it.replied = msg.replied; }
-        $('#repliedSlot').innerHTML = repliedBar(msg);
-        renderFeed(); toast('Reply sent');
+        const now = new Date().toISOString();
+        if (t.meta.box === 'inbox') {
+          const it = state.items.find((i) => i.acct === conv.acct && i.uid === t.meta.uid);
+          if (it) { it.answered = true; it.replied = { at: now, uid: null }; }
+          if (t.full) t.full.replied = { at: now, uid: null };
+        }
+        // Show what I just sent at the end of the conversation.
+        const acct = acctOf(conv.acct);
+        const to = isMe(conv, t) ? (t.full?.to || t.meta.to || []) : [t.full?.from || t.meta.from].filter(Boolean);
+        const sent = { meta: { box: 'sent', uid: null, date: now, from: { name: acct.name || '', address: acct.email }, to, subject: t.meta.subject, preview: body },
+          full: { box: 'sent', acct: conv.acct, to, cc: [], html: null, text: body, attachments: [], from: null }, open: true };
+        conv.msgs.push(sent);
+        conv.target = [...conv.msgs].reverse().find((x) => x.meta.uid) || t;
+        $('#replyAll').checked = false;
+        renderThread(conv); renderFeed(); toast('Reply sent');
       } catch (err) { toast(err.message); }
       b.disabled = false; b.textContent = 'Send';
     }
   };
-  if (hasCal && !showImages) setupCalendar(msg);
-  else if (hasCal && state.calKeep) { $('#calPanel').replaceWith(state.calKeep); }
-  $('#replyText').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('[data-act="send"]', r).click();
-  });
 }
 
 function fileToBase64(file) {
@@ -852,6 +1026,8 @@ async function openSettings() {
   });
 }
 $('#settingsBtn').onclick = openSettings;
+$('#viewToggle').addEventListener('click', (e) => { const b = e.target.closest('[data-v]'); if (b) setView(b.dataset.v); });
+setView(state.view);
 $('#refreshBtn').onclick = () => loadFeed(true);
 
 // Keep the feed fresh while the app is open.

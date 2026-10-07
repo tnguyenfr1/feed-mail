@@ -89,13 +89,22 @@ async function withMailbox(acct, path, fn, { fresh = false } = {}, retried = fal
 
 const withInbox = (acct, fn, opts) => withMailbox(acct, 'INBOX', fn, opts);
 
-// ---------- what have I replied to? ----------
-// Scan recent Sent mail and map each original Message-ID to my reply, so
-// replies made anywhere (phone app, webmail) are recognised.
+// ---------- Sent mail: replies and conversations ----------
+// Scan recent Sent mail so replies made anywhere (phone app, webmail) are
+// recognised, and so my own messages can be shown inside conversations.
 
 const SENT_SCAN = 300;
 const SENT_STALE_MS = 60 * 1000;
-const sentCache = new Map(); // account id -> { at, map }
+const sentCache = new Map(); // account id -> { at, map, items }
+
+const isGmail = (acct) => acct.provider === 'gmail';
+const msgIds = (s) => String(s || '').match(/<[^>]+>/g) || [];
+
+function refsFrom(headers) {
+  // Raw header block -> Message-IDs listed in References (may be folded).
+  const m = String(headers || '').replace(/\r?\n[ \t]+/g, ' ').match(/^references:(.*)$/im);
+  return m ? msgIds(m[1]) : [];
+}
 
 async function sentPath(acct) {
   const c = await getClient(acct);
@@ -103,41 +112,96 @@ async function sentPath(acct) {
   return c.fmSentPath;
 }
 
-async function sentIndex(acct) {
+async function boxPath(acct, box) {
+  if (box !== 'sent') return 'INBOX';
+  const path = await sentPath(acct);
+  if (!path) throw Object.assign(new Error('No Sent folder found.'), { status: 404 });
+  return path;
+}
+
+async function sentState(acct) {
   const hit = sentCache.get(acct.id);
-  if (hit && Date.now() - hit.at < SENT_STALE_MS) return hit.map;
+  if (hit && Date.now() - hit.at < SENT_STALE_MS) return hit;
   const map = new Map();
+  const items = [];
   const path = await sentPath(acct);
   if (path) {
     await withMailbox(acct, path, async (c) => {
       const exists = c.mailbox.exists;
       if (!exists) return;
-      for await (const m of c.fetch(`${Math.max(1, exists - SENT_SCAN + 1)}:*`, { uid: true, envelope: true, internalDate: true })) {
-        const date = (m.envelope?.date || m.internalDate || new Date()).toISOString();
-        for (const id of (m.envelope?.inReplyTo || '').match(/<[^>]+>/g) || []) {
+      for await (const m of c.fetch(`${Math.max(1, exists - SENT_SCAN + 1)}:*`, {
+        uid: true, envelope: true, internalDate: true, headers: ['references'], ...(isGmail(acct) && { threadId: true }),
+      })) {
+        const env = m.envelope || {};
+        const date = (env.date || m.internalDate || new Date()).toISOString();
+        const inReplyTo = msgIds(env.inReplyTo);
+        for (const id of inReplyTo) {
           const prev = map.get(id);
           if (!prev || prev.at < date) map.set(id, { at: date, uid: m.uid });
         }
+        // Keep previews already fetched for this message.
+        const old = hit?.items.find((x) => x.uid === m.uid);
+        items.push({
+          box: 'sent', uid: m.uid, date, messageId: env.messageId || null, inReplyTo, refs: refsFrom(m.headers),
+          gThread: m.threadId || null, from: addr(env.from?.[0]), to: (env.to || []).map(addr),
+          subject: env.subject || '(no subject)', preview: old?.preview,
+        });
       }
     });
   }
-  sentCache.set(acct.id, { at: Date.now(), map });
-  return map;
+  const state = { at: Date.now(), map, items };
+  sentCache.set(acct.id, state);
+  return state;
 }
 
-export async function getSentReply(acct, uid) {
-  const path = await sentPath(acct);
-  if (!path) throw Object.assign(new Error('No Sent folder found.'), { status: 404 });
-  const parsed = await withMailbox(acct, path, async (c) => {
-    const m = await c.fetchOne(String(uid), { source: true }, { uid: true });
-    if (!m) throw Object.assign(new Error('Reply not found in Sent.'), { status: 404 });
-    return simpleParser(m.source);
-  });
-  return {
-    date: (parsed.date || new Date()).toISOString(),
-    to: list(parsed.to),
-    text: stripQuote(parsed.text || ''),
+// Group messages into conversations: Gmail's own thread id, otherwise the
+// Message-ID / In-Reply-To / References links (union-find).
+function assignThreads(items) {
+  const parent = new Map();
+  const add = (x) => { if (!parent.has(x)) parent.set(x, x); };
+  const find = (x) => {
+    while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
+    return x;
   };
+  const union = (a, b) => {
+    add(a); add(b);
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) ra < rb ? parent.set(rb, ra) : parent.set(ra, rb);
+  };
+  const own = (it) => it.messageId || `${it.box}:${it.uid}`;
+  for (const it of items) {
+    if (it.gThread) continue;
+    add(own(it));
+    for (const r of [...(it.refs || []), ...(it.inReplyTo || [])]) union(own(it), r);
+  }
+  for (const it of items) it.thread = it.gThread ? `g${it.gThread}` : `m${find(own(it))}`;
+}
+
+export async function getThread(acct, key) {
+  const inbox = [...(known.get(acct.id)?.byUid.values() || [])].filter((i) => i.thread === key);
+  const sent = (sentCache.get(acct.id)?.items || []).filter((i) => i.thread === key);
+  const need = sent.filter((i) => i.preview === undefined);
+  if (need.length) {
+    const path = await sentPath(acct);
+    const fetched = await withMailbox(acct, path, async (c) => {
+      const out = [];
+      for await (const m of c.fetch(need.map((i) => i.uid).join(','), { uid: true, source: { maxLength: PREVIEW_BYTES } }, { uid: true })) out.push(m);
+      return out;
+    });
+    for (const m of fetched) {
+      const it = need.find((x) => x.uid === m.uid);
+      try {
+        const p = await simpleParser(m.source, { skipImageLinks: true, skipTextToHtml: true });
+        it.preview = stripQuote(p.text || '').replace(/\[?(https?:\/\/|mailto:)\S+\]?/g, '').replace(/\s+/g, ' ').trim().slice(0, 240);
+      } catch { it.preview = ''; }
+    }
+  }
+  const pick = (i, box) => ({
+    box, uid: i.uid, date: i.date, from: i.from, to: i.to, subject: i.subject, preview: i.preview || '',
+    seen: box === 'sent' ? true : !!i.seen, attach: !!i.attach, acct: acct.id,
+  });
+  return [...inbox.map((i) => pick(i, 'inbox')), ...sent.map((i) => pick(i, 'sent'))]
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
 }
 
 // Keep only what I wrote, not the quoted original below it.
@@ -153,6 +217,11 @@ function stripQuote(text) {
     out.push(lines[i]);
   }
   return out.join('\n').trim();
+}
+
+export async function getSentReply(acct, uid) {
+  const msg = await getMessage(acct, uid, 'sent');
+  return { date: msg.date, to: msg.to, text: stripQuote(msg.text || '') };
 }
 
 async function smtpTransport(acct) {
@@ -223,8 +292,8 @@ export async function fetchFeed(acct) {
     const fresh = [];
     if (missing.length) {
       for await (const m of c.fetch(missing.join(','), {
-        uid: true, envelope: true, internalDate: true, bodyStructure: true,
-        source: { maxLength: PREVIEW_BYTES },
+        uid: true, envelope: true, internalDate: true, bodyStructure: true, headers: ['references'],
+        source: { maxLength: PREVIEW_BYTES }, ...(isGmail(acct) && { threadId: true }),
       }, { uid: true })) fresh.push(m);
     }
     return { flags, fresh, validity };
@@ -247,6 +316,9 @@ export async function fetchFeed(acct) {
       to: (env.to || []).map(addr),
       subject: env.subject || '(no subject)',
       messageId: env.messageId || null,
+      inReplyTo: msgIds(env.inReplyTo),
+      refs: refsFrom(m.headers),
+      gThread: m.threadId || null,
       attach: hasAttachment(m.bodyStructure),
       preview,
     });
@@ -256,18 +328,34 @@ export async function fetchFeed(acct) {
   for (const uid of byUid.keys()) if (!current.has(uid)) byUid.delete(uid);
   known.set(acct.id, { validity, byUid });
 
-  let replies = new Map();
-  try { replies = await sentIndex(acct); } catch {}
+  let sent = { map: new Map(), items: [] };
+  try { sent = await sentState(acct); } catch {}
 
-  return flags.filter((m) => byUid.has(m.uid)).map((m) => {
+  const inbox = flags.filter((m) => byUid.has(m.uid)).map((m) => {
     const base = byUid.get(m.uid);
-    const answered = m.flags?.has('\\Answered') || false;
+    base.box = 'inbox';
+    base.seen = m.flags?.has('\\Seen') || false;
+    base.answered = m.flags?.has('\\Answered') || false;
+    base.flagged = m.flags?.has('\\Flagged') || false;
+    return base;
+  });
+  assignThreads([...inbox, ...sent.items]);
+
+  // Per conversation: how many of my own messages, and the latest one.
+  const mine = new Map();
+  for (const s of sent.items) {
+    const t = mine.get(s.thread) || { count: 0, lastAt: null };
+    t.count++;
+    if (!t.lastAt || s.date > t.lastAt) t.lastAt = s.date;
+    mine.set(s.thread, t);
+  }
+
+  return inbox.map((base) => {
+    const { refs, inReplyTo, gThread, ...item } = base;
     return {
-      ...base,
-      seen: m.flags?.has('\\Seen') || false,
-      flagged: m.flags?.has('\\Flagged') || false,
-      answered,
-      replied: replies.get(base.messageId) || (answered ? { at: null, uid: null } : null),
+      ...item,
+      replied: sent.map.get(base.messageId) || (base.answered ? { at: null, uid: null } : null),
+      threadSent: mine.get(base.thread) || null,
     };
   });
 }
@@ -284,10 +372,10 @@ async function fetchParsed(acct, uid, c) {
 
 const list = (v) => (v ? v.value || [] : []).map(addr);
 
-export async function getMessage(acct, uid) {
-  const { parsed } = await withInbox(acct, async (c) => {
+export async function getMessage(acct, uid, box = 'inbox') {
+  const { parsed } = await withMailbox(acct, await boxPath(acct, box), async (c) => {
     const r = await fetchParsed(acct, uid, c);
-    if (!r.flags?.has('\\Seen')) await c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+    if (box === 'inbox' && !r.flags?.has('\\Seen')) await c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
     return r;
   });
 
@@ -309,14 +397,15 @@ export async function getMessage(acct, uid) {
   const invite = ics ? parseInvite(ics) : null;
 
   let replied = null;
-  try { replied = (await sentIndex(acct)).get(parsed.messageId) || null; } catch {}
+  if (box === 'inbox') try { replied = (await sentState(acct)).map.get(parsed.messageId) || null; } catch {}
 
   return {
     acct: acct.id,
     uid: Number(uid),
+    box,
     messageId: parsed.messageId || null,
     replied,
-    invite,
+    invite: box === 'inbox' ? invite : null,
     dates: findDates(parsed.subject, parsed.text, parsed.date || new Date()),
     subject: parsed.subject || '(no subject)',
     date: (parsed.date || new Date()).toISOString(),
@@ -364,8 +453,8 @@ export async function sendInviteReply(acct, parsed, icsReply, label) {
   }
 }
 
-export async function getAttachment(acct, uid, idx) {
-  const { parsed } = await withInbox(acct, (c) => fetchParsed(acct, uid, c));
+export async function getAttachment(acct, uid, idx, box = 'inbox') {
+  const { parsed } = await withMailbox(acct, await boxPath(acct, box), (c) => fetchParsed(acct, uid, c));
   const a = parsed.attachments[Number(idx)];
   if (!a) {
     const e = new Error('Attachment not found');
@@ -398,17 +487,31 @@ export async function deleteMessage(acct, uid) {
 const esc = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 const fmtAddr = (a) => (a.name ? `${a.name} <${a.address}>` : a.address);
 
-export async function sendReply(acct, uid, { body, all, attachments = [] }) {
-  const servers = serversFor(acct);
-  const { parsed } = await withInbox(acct, (c) => fetchParsed(acct, uid, c));
-
+// Who a reply goes to. Replying to my own sent message is a follow-up to
+// the same people.
+export function replyRecipients(acct, parsed, box, all) {
   const me = acct.email.toLowerCase();
   const same = (a, b) => a.address?.toLowerCase() === b.address?.toLowerCase();
-  const to = list(parsed.replyTo).length ? list(parsed.replyTo) : list(parsed.from);
+  const notMe = (a) => a.address && a.address.toLowerCase() !== me;
+  let to, rest;
+  if (box === 'sent') {
+    to = list(parsed.to).filter(notMe);
+    rest = list(parsed.cc);
+  } else {
+    to = list(parsed.replyTo).length ? list(parsed.replyTo) : list(parsed.from);
+    rest = [...list(parsed.to), ...list(parsed.cc)];
+  }
   const cc = all
-    ? [...list(parsed.to), ...list(parsed.cc)].filter(
-        (a, i, arr) => a.address && a.address.toLowerCase() !== me && !to.some((t) => same(t, a)) && arr.findIndex((x) => same(x, a)) === i)
+    ? rest.filter((a, i, arr) => notMe(a) && !to.some((t) => same(t, a)) && arr.findIndex((x) => same(x, a)) === i)
     : [];
+  return { to, cc };
+}
+
+export async function sendReply(acct, uid, { body, all, attachments = [], box = 'inbox' }) {
+  const servers = serversFor(acct);
+  const { parsed } = await withMailbox(acct, await boxPath(acct, box), (c) => fetchParsed(acct, uid, c));
+  const { to, cc } = replyRecipients(acct, parsed, box, all);
+  if (!to.length) throw Object.assign(new Error('No one to reply to.'), { status: 400 });
 
   const subject = parsed.subject || '';
   const refs = [].concat(parsed.references || [], parsed.messageId || []);
@@ -445,7 +548,7 @@ export async function sendReply(acct, uid, { body, all, attachments = [] }) {
   sentCache.delete(acct.id); // so the next refresh picks up the new Sent copy
 
   await withInbox(acct, async (c) => {
-    await c.messageFlagsAdd(String(uid), ['\\Answered'], { uid: true });
+    if (box === 'inbox') await c.messageFlagsAdd(String(uid), ['\\Answered'], { uid: true });
     if (servers.appendSent) {
       const sent = await findSpecial(c, '\\Sent');
       if (sent) await c.append(sent, raw, ['\\Seen']);

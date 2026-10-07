@@ -241,6 +241,14 @@ app.get('/api/feed', async (req, res) => {
   res.json({ items, status });
 });
 
+const boxOf = (req) => (req.query.box === 'sent' ? 'sent' : 'inbox');
+
+app.get('/api/thread/:acct/:key', async (req, res, next) => {
+  try {
+    res.json(await mail.getThread(findAccount(req.params.acct), req.params.key));
+  } catch (err) { next(err); }
+});
+
 function patchCached(acctId, uid, fn) {
   const it = cache.get(acctId)?.items?.find((x) => x.uid === Number(uid));
   if (it) fn(it);
@@ -248,15 +256,16 @@ function patchCached(acctId, uid, fn) {
 
 app.get('/api/msg/:acct/:uid', async (req, res, next) => {
   try {
-    const msg = await mail.getMessage(findAccount(req.params.acct), req.params.uid);
-    patchCached(req.params.acct, req.params.uid, (it) => { it.seen = true; });
+    const box = boxOf(req);
+    const msg = await mail.getMessage(findAccount(req.params.acct), req.params.uid, box);
+    if (box === 'inbox') patchCached(req.params.acct, req.params.uid, (it) => { it.seen = true; });
     res.json(msg);
   } catch (err) { next(err); }
 });
 
 app.get('/api/msg/:acct/:uid/att/:idx', async (req, res, next) => {
   try {
-    const a = await mail.getAttachment(findAccount(req.params.acct), req.params.uid, req.params.idx);
+    const a = await mail.getAttachment(findAccount(req.params.acct), req.params.uid, req.params.idx, boxOf(req));
     res.set('Content-Type', a.contentType || 'application/octet-stream');
     res.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(a.filename || 'attachment')}`);
     res.send(a.content);
@@ -299,8 +308,9 @@ app.post('/api/msg/:acct/:uid/reply', async (req, res, next) => {
     if (attachments.reduce((n, a) => n + a.content.length, 0) > MAX_ATTACH) {
       return res.status(413).json({ error: 'Attachments are too big (20 MB max in total).' });
     }
-    await mail.sendReply(findAccount(req.params.acct), req.params.uid, { body, all: !!req.body.all, attachments });
-    patchCached(req.params.acct, req.params.uid, (it) => { it.answered = true; it.replied = { at: new Date().toISOString(), uid: null }; });
+    const box = boxOf(req);
+    await mail.sendReply(findAccount(req.params.acct), req.params.uid, { body, all: !!req.body.all, attachments, box });
+    if (box === 'inbox') patchCached(req.params.acct, req.params.uid, (it) => { it.answered = true; it.replied = { at: new Date().toISOString(), uid: null }; });
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
