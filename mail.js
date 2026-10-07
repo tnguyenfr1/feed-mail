@@ -53,17 +53,25 @@ export function dropClient(acctId) {
   p?.then((c) => c.logout().catch(() => c.close())).catch(() => {});
 }
 
+// Some servers (Yahoo) never tell a long-open session about new mail, so
+// re-select INBOX when the view may be stale.
+const RESELECT_MS = 15 * 1000;
+
 // Run fn with INBOX selected; retry once on a dead connection.
-async function withInbox(acct, fn, retried = false) {
+async function withInbox(acct, fn, { fresh = false } = {}, retried = false) {
   const c = await getClient(acct);
   let lock;
   try {
     lock = await c.getMailboxLock('INBOX');
+    if (fresh || !c.fmSelectedAt || Date.now() - c.fmSelectedAt > RESELECT_MS) {
+      await c.mailboxOpen('INBOX');
+    }
+    c.fmSelectedAt = Date.now();
     return await fn(c);
   } catch (err) {
     if (!retried && !c.usable) {
       clients.delete(acct.id);
-      return withInbox(acct, fn, true);
+      return withInbox(acct, fn, { fresh }, true);
     }
     throw friendly(err);
   } finally {
@@ -123,7 +131,7 @@ export async function fetchFeed(acct) {
       source: { maxLength: PREVIEW_BYTES },
     })) out.push(m);
     return out;
-  });
+  }, { fresh: true });
 
   const items = [];
   for (const m of raw) {
