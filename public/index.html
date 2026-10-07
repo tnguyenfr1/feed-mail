@@ -1238,6 +1238,22 @@ $('#refreshBtn').onclick = () => loadFeed(true);
 setInterval(() => { if (!document.hidden && !$('#app').classList.contains('hidden') && state.accounts.length) loadFeed(); }, 60000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && state.accounts.length && !$('#app').classList.contains('hidden')) loadFeed(); });
 
+// When the app comes back to the screen, reload if the Pi has a newer version
+// (only while on the feed, so nothing you're typing is lost).
+(() => {
+  let loaded = null;
+  const check = async () => {
+    try {
+      const { v } = await (await fetch('/version', { cache: 'no-store' })).json();
+      if (loaded === null) { loaded = v; return; }
+      if (v !== loaded && !state.current && !$('.sheet-back')) location.reload();
+    } catch {}
+  };
+  check();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+  setInterval(check, 5 * 60 * 1000);
+})();
+
 boot();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 </script>

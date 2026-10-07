@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { execFile } from 'node:child_process';
 import express from 'express';
 import compression from 'compression';
@@ -417,7 +418,19 @@ app.use('/api', (err, req, res, next) => {
   res.status(err.status || 500).json({ error: err.message || 'Something went wrong' });
 });
 
-app.use(express.static(new URL('./public', import.meta.url).pathname, { index: 'index.html' }));
+const PUBLIC = new URL('./public', import.meta.url).pathname;
+
+// The page's version (its last change), so open apps notice updates.
+app.get('/version', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ v: String(fs.statSync(PUBLIC + '/index.html').mtimeMs) });
+});
+
+app.use(express.static(PUBLIC, {
+  index: 'index.html',
+  // Always fetch the page itself fresh; installed phone apps otherwise keep old copies.
+  setHeaders: (res, path) => { if (path.endsWith('.html') || path.endsWith('sw.js')) res.set('Cache-Control', 'no-cache, no-store'); },
+}));
 
 app.listen(PORT, HOST, () => console.log(`Feed Mail on http://${HOST}:${PORT}`));
 
