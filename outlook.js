@@ -110,10 +110,15 @@ const htmlToText = (html) => String(html || '')
 async function loadMessage(acct, id) {
   return graph(acct, `/me/messages/${encodeURIComponent(id)}`, {
     query: {
-      $select: 'id,subject,from,toRecipients,ccRecipients,replyTo,receivedDateTime,sentDateTime,body,hasAttachments,internetMessageId,isRead,parentFolderId,meetingMessageType,conversationId',
+      $select: 'id,subject,from,toRecipients,ccRecipients,replyTo,receivedDateTime,sentDateTime,body,hasAttachments,internetMessageId,isRead,parentFolderId,conversationId',
       $expand: 'attachments($select=id,name,contentType,size,isInline)',
     },
   });
+}
+
+// The full invitation message with its calendar event attached.
+function loadEventMessage(acct, uid) {
+  return graph(acct, `/me/messages/${encodeURIComponent(uid)}`, { query: { $expand: 'microsoft.graph.eventMessage/event' } });
 }
 
 function inviteFrom(m) {
@@ -156,14 +161,10 @@ export async function getMessage(acct, uid, box = 'inbox') {
     }
   }
 
+  // Meeting invitations are a special kind of message (eventMessageRequest).
   let invite = null;
-  if (box === 'inbox' && m.meetingMessageType === 'meetingRequest') {
-    try {
-      const ev = await graph(acct, `/me/messages/${encodeURIComponent(uid)}`, {
-        query: { $select: 'meetingMessageType,subject', $expand: 'microsoft.graph.eventMessage/event' },
-      });
-      invite = inviteFrom(ev);
-    } catch {}
+  if (box === 'inbox' && /eventMessageRequest/i.test(m['@odata.type'] || '')) {
+    try { invite = inviteFrom(await loadEventMessage(acct, uid)); } catch {}
   }
 
   // Use what the last feed refresh learned about my sent mail.
@@ -252,10 +253,7 @@ export async function sendReply(acct, uid, { body, all, attachments = [], box = 
 
 // Answer an Outlook meeting request; Outlook tells the organizer and updates the calendar.
 export async function rsvp(acct, uid, partstat) {
-  const ev = await graph(acct, `/me/messages/${encodeURIComponent(uid)}`, {
-    query: { $select: 'meetingMessageType,subject', $expand: 'microsoft.graph.eventMessage/event' },
-  });
-  const invite = inviteFrom(ev);
+  const invite = inviteFrom(await loadEventMessage(acct, uid));
   if (!invite?.graphEventId) throw Object.assign(new Error('Open this invitation in Outlook to answer it.'), { status: 400 });
   const verb = { ACCEPTED: 'accept', TENTATIVE: 'tentativelyAccept', DECLINED: 'decline' }[partstat];
   await graph(acct, `/me/events/${encodeURIComponent(invite.graphEventId)}/${verb}`, { method: 'POST', body: { sendResponse: true } });
