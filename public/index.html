@@ -149,6 +149,7 @@ html, body { overscroll-behavior-y: none; }
 .meta .lines { flex: 1; min-width: 0; font-size: 14px; }
 .meta .lines .muted { color: var(--muted); word-break: break-word; }
 .msg-frame-wrap { background: #fff; border-radius: 12px; border: 1px solid var(--line); overflow: hidden; }
+.msg-frame-wrap.dark { background: #1a1d24; }
 .msg-frame { width: 100%; border: 0; display: block; min-height: 120px; }
 .msg-text { white-space: pre-wrap; word-break: break-word; background: var(--card); border: 1px solid var(--line);
   border-radius: 12px; padding: 16px; }
@@ -859,7 +860,24 @@ function repliedBar(m) {
     ${m.full.replied.uid ? `<button class="btn ghost" data-act="myreply">Show my reply</button>` : ''}</div>`;
 }
 
-function frameDoc(html, showImages) {
+// Plain, person-written emails (no backgrounds, no layout) can follow the dark
+// theme; designed emails keep the white page they were made for.
+const darkTheme = () => window.matchMedia('(prefers-color-scheme: dark)').matches;
+function isSimpleHtml(html) {
+  if (/bgcolor\s*=|background(-color|-image)?\s*:|background\s*=/i.test(html)) return false;
+  if (/<table[^>]*\swidth\s*=\s*["']?[3-9]\d\d/i.test(html)) return false;
+  if ((html.match(/<img/gi) || []).length > 2) return false;
+  return true;
+}
+const DARK_EMAIL_CSS = `
+  body{background:#1a1d24!important;color:#e8eaf0!important}
+  body *{color:inherit!important;background-color:transparent!important;border-color:#3a3f4b!important}
+  a,a *{color:#7c9bff!important}
+  blockquote{border-left:2px solid #3a3f4b!important;margin-left:0!important;padding-left:12px!important}
+  blockquote,blockquote *{color:#9aa1ad!important}
+  hr{border:0!important;border-top:1px solid #3a3f4b!important}`;
+
+function frameDoc(html, showImages, dark = false) {
   const img = showImages ? 'data: cid: https: http:' : 'data: cid:';
   return `<!doctype html><html><head><meta charset="utf-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' https:; img-src ${img}; font-src data: https:;">
@@ -870,6 +888,7 @@ function frameDoc(html, showImages) {
       img,video{max-width:100%!important;height:auto!important}
       table{max-width:100%!important}
       pre{white-space:pre-wrap}
+      ${dark ? DARK_EMAIL_CSS : ''}
     </style>
     </head><body>${html}</body></html>`;
 }
@@ -900,7 +919,7 @@ function messageHtml(conv, m, idx) {
       ${conv.msgs.length === 1 ? repliedBar(m) : ''}
       ${hasRemote && !m.showImages ? `<div class="img-note">Images from the internet are hidden to protect your privacy.<button class="btn ghost" data-act="images" data-idx="${idx}">Show images</button></div>` : ''}
       ${f.html
-        ? `<div class="msg-frame-wrap"><iframe class="msg-frame" data-frame="${idx}" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe></div>`
+        ? `<div class="msg-frame-wrap ${darkTheme() && isSimpleHtml(f.html) ? 'dark' : ''}"><iframe class="msg-frame" data-frame="${idx}" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe></div>`
         : `<div class="msg-text">${linkify(f.text)}</div>`}
       ${f.attachments.length ? `<div class="atts">${f.attachments.map((x) =>
         `<a class="att" href="/api${msgUrl(f, '/att/' + x.idx)}">📎 ${esc(x.filename)} <span style="color:var(--muted)">${fmtSize(x.size)}</span></a>`).join('')}</div>` : ''}`;
@@ -976,7 +995,7 @@ function renderThread(conv) {
       setTimeout(fit, 500);
       setTimeout(fit, 1500);
     });
-    frame.srcdoc = frameDoc(m.full.html, m.showImages);
+    frame.srcdoc = frameDoc(m.full.html, m.showImages, darkTheme() && isSimpleHtml(m.full.html));
   });
   updateComposerTarget(conv);
 }
