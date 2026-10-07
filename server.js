@@ -9,6 +9,7 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const STALE_MS = 45 * 1000;
 const SESSION_DAYS = 90;
+const MAX_ATTACH = 20 * 1024 * 1024;
 
 const config = loadConfig();
 let accounts = loadAccounts();
@@ -16,7 +17,7 @@ const cache = new Map(); // account id -> { at, items, error, pending }
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '40mb' })); // replies can carry attachments
 app.use((req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff');
   res.set('Referrer-Policy', 'no-referrer');
@@ -227,7 +228,15 @@ app.post('/api/msg/:acct/:uid/reply', async (req, res, next) => {
   try {
     const body = String(req.body.body || '').trim();
     if (!body) return res.status(400).json({ error: 'Write something first.' });
-    await mail.sendReply(findAccount(req.params.acct), req.params.uid, { body, all: !!req.body.all });
+    const attachments = (Array.isArray(req.body.attachments) ? req.body.attachments : []).map((a) => ({
+      filename: String(a.filename || 'file'),
+      contentType: String(a.contentType || 'application/octet-stream'),
+      content: Buffer.from(String(a.data || ''), 'base64'),
+    }));
+    if (attachments.reduce((n, a) => n + a.content.length, 0) > MAX_ATTACH) {
+      return res.status(413).json({ error: 'Attachments are too big (20 MB max in total).' });
+    }
+    await mail.sendReply(findAccount(req.params.acct), req.params.uid, { body, all: !!req.body.all, attachments });
     patchCached(req.params.acct, req.params.uid, (it) => { it.answered = true; });
     res.json({ ok: true });
   } catch (err) { next(err); }

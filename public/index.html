@@ -206,6 +206,12 @@ header.top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.01em; }
 .invite .rsvp .btn { padding: 7px 12px; font-size: 13px; }
 .cal-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
 .cal-note.bad { color: var(--danger); }
+.files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.files:empty { display: none; }
+.files .f { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px 5px 10px; border: 1px solid var(--line);
+  border-radius: 8px; font-size: 13px; background: var(--bg); max-width: 100%; }
+.files .f span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.files .f button { border: 0; background: none; padding: 0 2px; color: var(--muted); font-size: 15px; line-height: 1; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
 </style>
@@ -473,7 +479,9 @@ function renderMessage(msg, showImages) {
     </div>${hasCal ? '<details class="cal" id="calPanel"></details>' : ''}</div></div></div>
     <div class="composer">
       <textarea id="replyText" placeholder="Write a reply…"></textarea>
+      <div class="files" id="replyFiles"></div>
       <div class="actions">
+        <label class="btn ghost" style="padding:8px 12px" title="Attach files">📎 Attach<input type="file" id="replyFileInput" multiple hidden></label>
         <div class="to" id="replyTo">Reply to ${esc(fmtAddr(msg.from))}</div>
         ${msg.to.length + msg.cc.length > 1 ? `<label style="font-size:13px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="replyAll"> Reply all</label>` : ''}
         <button class="btn" data-act="send">Send</button>
@@ -491,6 +499,22 @@ function renderMessage(msg, showImages) {
     });
     frame.srcdoc = frameDoc(msg.html, showImages);
   }
+
+  const files = [];
+  const renderFiles = () => {
+    $('#replyFiles').innerHTML = files.map((f, i) => `<div class="f"><span>📎 ${esc(f.name)}</span> <small style="color:var(--muted)">${fmtSize(f.size)}</small><button data-rmfile="${i}" aria-label="Remove">×</button></div>`).join('');
+  };
+  $('#replyFileInput').addEventListener('change', (e) => {
+    for (const f of e.target.files) files.push(f);
+    e.target.value = '';
+    const total = files.reduce((n, f) => n + f.size, 0);
+    if (total > 20 * 1024 * 1024) toast('Attachments are over 20 MB in total; most mail servers will refuse them.');
+    renderFiles();
+  });
+  $('#replyFiles').addEventListener('click', (e) => {
+    const x = e.target.closest('[data-rmfile]'); if (!x) return;
+    files.splice(Number(x.dataset.rmfile), 1); renderFiles();
+  });
 
   r.onclick = async (e) => {
     const b = e.target.closest('[data-act]'); if (!b) return;
@@ -516,8 +540,10 @@ function renderMessage(msg, showImages) {
       if (!body) return $('#replyText').focus();
       b.disabled = true; b.textContent = 'Sending…';
       try {
-        await api(`/msg/${msg.acct}/${msg.uid}/reply`, { method: 'POST', body: { body, all: !!$('#replyAll')?.checked } });
+        const attachments = await Promise.all(files.map(async (f) => ({ filename: f.name, contentType: f.type, data: await fileToBase64(f) })));
+        await api(`/msg/${msg.acct}/${msg.uid}/reply`, { method: 'POST', body: { body, all: !!$('#replyAll')?.checked, attachments } });
         $('#replyText').value = '';
+        files.length = 0; renderFiles();
         const it = state.items.find((i) => i.acct === msg.acct && i.uid === msg.uid);
         if (it) it.answered = true;
         renderFeed(); toast('Reply sent');
@@ -529,6 +555,15 @@ function renderMessage(msg, showImages) {
   else if (hasCal && state.calKeep) { $('#calPanel').replaceWith(state.calKeep); }
   $('#replyText').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('[data-act="send"]', r).click();
+  });
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
+    fr.onerror = () => reject(new Error('Could not read ' + file.name));
+    fr.readAsDataURL(file);
   });
 }
 

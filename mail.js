@@ -280,7 +280,7 @@ export async function deleteMessage(acct, uid) {
 const esc = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 const fmtAddr = (a) => (a.name ? `${a.name} <${a.address}>` : a.address);
 
-export async function sendReply(acct, uid, { body, all }) {
+export async function sendReply(acct, uid, { body, all, attachments = [] }) {
   const servers = serversFor(acct);
   const { parsed } = await withInbox(acct, (c) => fetchParsed(acct, uid, c));
 
@@ -310,6 +310,7 @@ export async function sendReply(acct, uid, { body, all }) {
     text: `${body}\n\n${intro}\n${quotedText}`,
     html: `<div style="white-space:pre-wrap">${esc(body)}</div><br><div>${esc(intro)}</div>`
       + `<blockquote style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">${quotedHtml}</blockquote>`,
+    attachments: attachments.length ? attachments : undefined,
   };
 
   const raw = await new MailComposer(mail).compile().build();
