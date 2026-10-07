@@ -1107,6 +1107,12 @@ async function openSettings() {
     </form>
     <h3>This device</h3>
     <button class="btn ghost" data-logout>Log out</button>
+    <h3>Raspberry Pi</h3>
+    <p class="sub">Shut down before unplugging. To start it again, unplug and plug the power back in.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn danger" data-system="poweroff">Shut down Pi</button>
+      <button class="btn ghost" data-system="reboot">Restart Pi</button>
+    </div>
   </div>`;
   document.body.append(back);
 
@@ -1182,6 +1188,19 @@ async function openSettings() {
     }
     const k = e.target.closest('[data-keys]');
     if (k) { e.preventDefault(); oauthBox(k.dataset.keys, true); return; }
+    const sys = e.target.closest('[data-system]');
+    if (sys) {
+      const off = sys.dataset.system === 'poweroff';
+      if (sys.dataset.confirm !== '1') { sys.dataset.confirm = '1'; sys.textContent = off ? 'Tap again to shut down' : 'Tap again to restart'; return; }
+      sys.disabled = true;
+      try {
+        await api('/system/' + sys.dataset.system, { method: 'POST' });
+        back.querySelector('.sheet').innerHTML = off
+          ? `<h2>Shutting down…</h2><p class="sub">Wait about 20 seconds, until the Pi's green light stops flickering. Then it's safe to unplug.<br><br>To start it again: unplug and plug the power back in. Feed Mail is back about a minute later.</p>`
+          : `<h2>Restarting…</h2><p class="sub">Feed Mail will be back in about a minute. Reopen or refresh the app then.</p>`;
+      } catch (err) { toast(err.message); sys.disabled = false; }
+      return;
+    }
     if (e.target.closest('[data-logout]')) { await api('/logout', { method: 'POST' }); location.reload(); }
   });
 

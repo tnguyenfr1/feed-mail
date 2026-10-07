@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
 import express from 'express';
 import compression from 'compression';
 import { loadAccounts, saveAccounts, loadConfig, saveConfig } from './store.js';
@@ -346,6 +347,16 @@ app.post('/api/msg/:acct/:uid/reply', async (req, res, next) => {
     if (box === 'inbox') patchCached(req.params.acct, req.params.uid, (it) => { it.answered = true; it.replied = { at: new Date().toISOString(), uid: null }; });
     res.json({ ok: true });
   } catch (err) { next(err); }
+});
+
+// ---------- the Pi itself ----------
+// The Pi has no power button: let the owner shut it down cleanly before unplugging.
+
+app.post('/api/system/:action', (req, res) => {
+  const cmd = { poweroff: 'poweroff', reboot: 'reboot' }[req.params.action];
+  if (!cmd) return res.status(404).json({ error: 'Unknown action' });
+  res.json({ ok: true });
+  setTimeout(() => execFile('sudo', ['-n', 'systemctl', cmd], (err) => { if (err) console.error('system', cmd, err.message); }), 1000);
 });
 
 // ---------- calendar ----------
