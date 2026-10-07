@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f7fb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111318" media="(prefers-color-scheme: dark)">
+<title>Feed Mail</title>
+<style>
+:root {
+  --bg: #f6f7fb; --card: #ffffff; --ink: #161a23; --muted: #6b7280; --line: #e5e7ee;
+  --accent: #3b6cf6; --accent-ink: #ffffff; --danger: #d64545; --unread: #3b6cf6;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+  --radius: 14px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111318; --card: #1a1d24; --ink: #e8eaf0; --muted: #9aa1ad; --line: #2a2e38;
+    --accent: #6b8eff; --accent-ink: #0b0d12; --danger: #ff6b6b; --unread: #7c9bff;
+    --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; color: inherit; cursor: pointer; }
+input, textarea, select { font: inherit; color: var(--ink); }
+.hidden { display: none !important; }
+
+/* ---------- login ---------- */
+#login { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; }
+.login-box {
+  width: 100%; max-width: 360px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 20px; padding: 28px 24px; box-shadow: var(--shadow);
+}
+.login-box h1 { margin: 0 0 4px; font-size: 24px; }
+.login-box p { margin: 0 0 18px; color: var(--muted); }
+
+.field { display: block; margin-bottom: 12px; }
+.field span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.field input, .field select, textarea {
+  width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--bg); outline: none;
+}
+.field input:focus, .field select:focus, textarea:focus { border-color: var(--accent); }
+.btn {
+  border: 0; border-radius: 10px; padding: 10px 16px; background: var(--accent);
+  color: var(--accent-ink); font-weight: 600;
+}
+.btn:disabled { opacity: .6; cursor: default; }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); font-weight: 500; }
+.btn.danger { background: transparent; color: var(--danger); border: 1px solid var(--line); font-weight: 500; }
+.btn.wide { width: 100%; }
+.err { color: var(--danger); font-size: 14px; min-height: 20px; margin: 4px 0 8px; }
+
+/* ---------- layout ---------- */
+#app { height: 100%; display: grid; grid-template-columns: 1fr; }
+@media (min-width: 960px) { #app { grid-template-columns: minmax(380px, 440px) 1fr; } }
+.feed-col { display: flex; flex-direction: column; min-height: 0; height: 100%; border-right: 1px solid var(--line); }
+
+header.top {
+  display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+  padding-top: max(12px, env(safe-area-inset-top));
+}
+header.top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.01em; }
+.icon-btn {
+  width: 40px; height: 40px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--card); display: grid; place-items: center;
+}
+.icon-btn svg { width: 20px; height: 20px; }
+.spin svg { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.chips { display: flex; gap: 8px; padding: 0 16px 10px; overflow-x: auto; scrollbar-width: none; }
+.chips::-webkit-scrollbar { display: none; }
+.chip {
+  flex: none; border: 1px solid var(--line); background: var(--card); border-radius: 999px;
+  padding: 6px 12px; font-size: 13px; display: flex; align-items: center; gap: 6px;
+}
+.chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+.chip.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.chip .count { opacity: .7; }
+
+.banner { margin: 0 16px 10px; padding: 10px 12px; border-radius: 10px; font-size: 13px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+
+#feed { flex: 1; overflow-y: auto; padding: 0 12px 24px; -webkit-overflow-scrolling: touch; }
+.day { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); padding: 14px 6px 6px; }
+.card {
+  position: relative; display: block; width: 100%; text-align: left; background: var(--card);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px 12px 18px;
+  margin-bottom: 8px; box-shadow: var(--shadow); overflow: hidden;
+}
+.card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--acct); }
+.card.active { outline: 2px solid var(--accent); outline-offset: -1px; }
+.card .row { display: flex; align-items: center; gap: 10px; }
+.avatar {
+  flex: none; width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center;
+  font-weight: 700; font-size: 14px; color: #fff; background: var(--acct);
+}
+.who { flex: 1; min-width: 0; }
+.who .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.who .acct { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.when { flex: none; font-size: 12px; color: var(--muted); }
+.subject { margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.preview { color: var(--muted); font-size: 14px; margin-top: 2px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card.unread .subject { font-weight: 700; }
+.card.unread .name::after { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--unread); margin-left: 6px; vertical-align: middle; }
+.tags { display: inline-flex; gap: 4px; margin-left: 4px; color: var(--muted); font-size: 12px; }
+.empty { text-align: center; color: var(--muted); padding: 48px 16px; }
+
+/* ---------- reader ---------- */
+#reader { display: none; flex-direction: column; min-height: 0; height: 100%; background: var(--bg); }
+#reader.open { display: flex; }
+@media (max-width: 959px) {
+  #reader { position: fixed; inset: 0; z-index: 10; }
+}
+@media (min-width: 960px) {
+  #reader { display: flex; }
+  #reader .back { display: none; }
+}
+.reader-top { display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+  padding-top: max(12px, env(safe-area-inset-top)); border-bottom: 1px solid var(--line); }
+.reader-top .spacer { flex: 1; }
+.reader-body { flex: 1; overflow-y: auto; padding: 16px; -webkit-overflow-scrolling: touch; }
+.reader-inner { max-width: 820px; margin: 0 auto; }
+.reader-body h2 { margin: 0 0 12px; font-size: 21px; line-height: 1.3; }
+.meta { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 14px; }
+.meta .lines { flex: 1; min-width: 0; font-size: 14px; }
+.meta .lines .muted { color: var(--muted); word-break: break-word; }
+.msg-frame-wrap { background: #fff; border-radius: 12px; border: 1px solid var(--line); overflow: hidden; }
+.msg-frame { width: 100%; border: 0; display: block; min-height: 120px; }
+.msg-text { white-space: pre-wrap; word-break: break-word; background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 16px; }
+.msg-text a { color: var(--accent); }
+.img-note { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px;
+  color: var(--muted); margin-bottom: 10px; }
+.atts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.att { display: inline-flex; gap: 6px; align-items: center; padding: 8px 12px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--card); color: var(--ink); text-decoration: none; font-size: 13px; }
+.reader-placeholder { flex: 1; display: grid; place-items: center; color: var(--muted); }
+
+.composer { border-top: 1px solid var(--line); background: var(--card); padding: 12px 16px;
+  padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+.composer textarea { min-height: 110px; resize: vertical; background: var(--bg); }
+.composer .actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.composer .actions .to { flex: 1; font-size: 13px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- settings sheet ---------- */
+.sheet-back { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 20; display: grid; place-items: end center; }
+@media (min-width: 640px) { .sheet-back { place-items: center; } }
+.sheet { width: 100%; max-width: 520px; max-height: 92vh; overflow-y: auto; background: var(--card);
+  border-radius: 20px 20px 0 0; padding: 20px 16px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+@media (min-width: 640px) { .sheet { border-radius: 20px; padding: 24px; } }
+.sheet h2 { margin: 0 0 4px; font-size: 20px; }
+.sheet h3 { margin: 20px 0 10px; font-size: 15px; }
+.sheet .sub { color: var(--muted); margin: 0 0 12px; font-size: 14px; }
+.acct-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.acct-row .info { flex: 1; min-width: 0; }
+.acct-row .info div:last-child { font-size: 13px; color: var(--muted); }
+.colors { display: flex; gap: 8px; flex-wrap: wrap; }
+.colors button { width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; }
+.colors button.on { border-color: var(--ink); }
+.hint { font-size: 13px; color: var(--muted); background: var(--bg); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
+  padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
+</style>
+</head>
+<body>
+
+<div id="login" class="hidden">
+  <form class="login-box" id="loginForm">
+    <h1>Feed Mail</h1>
+    <p id="loginSub">All your inboxes in one feed.</p>
+    <label class="field"><span id="pwLabel">Password</span>
+      <input type="password" id="pw" autocomplete="current-password" required></label>
+    <label class="field hidden" id="pw2Wrap"><span>Repeat password</span>
+      <input type="password" id="pw2" autocomplete="new-password"></label>
+    <div class="err" id="loginErr"></div>
+    <button class="btn wide" id="loginBtn">Log in</button>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+  <section class="feed-col">
+    <header class="top">
+      <h1>Feed</h1>
+      <button class="icon-btn" id="refreshBtn" title="Refresh" aria-label="Refresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+      </button>
+      <button class="icon-btn" id="settingsBtn" title="Accounts" aria-label="Accounts">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </header>
+    <div class="chips" id="chips"></div>
+    <div id="banners"></div>
+    <div id="feed"></div>
+  </section>
+
+  <section id="reader">
+    <div class="reader-placeholder" id="readerEmpty">Pick an email from the feed</div>
+  </section>
+</div>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const COLORS = ['#3b6cf6', '#7c3aed', '#db2777', '#ea580c', '#16a34a', '#0891b2', '#ca8a04', '#64748b'];
+
+const state = { accounts: [], items: [], status: {}, filter: 'all', current: null, loading: false };
+
+async function api(path, opts = {}) {
+  const res = await fetch('/api' + path, {
+    ...opts,
+    headers: opts.body ? { 'Content-Type': 'application/json' } : {},
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  if (res.status === 401 && path !== '/login') { showLogin(); throw new Error('Not logged in'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+function toast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast'; t.textContent = msg;
+  document.body.append(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+// ---------- login ----------
+let setupMode = false;
+function showLogin() {
+  $('#app').classList.add('hidden');
+  $('#login').classList.remove('hidden');
+}
+$('#loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const pw = $('#pw').value;
+  $('#loginErr').textContent = '';
+  if (setupMode && pw !== $('#pw2').value) { $('#loginErr').textContent = 'The two passwords differ.'; return; }
+  $('#loginBtn').disabled = true;
+  try {
+    await api(setupMode ? '/setup' : '/login', { method: 'POST', body: { password: pw } });
+    $('#pw').value = $('#pw2').value = '';
+    startApp();
+  } catch (err) { $('#loginErr').textContent = err.message; }
+  $('#loginBtn').disabled = false;
+});
+
+async function boot() {
+  const s = await api('/session');
+  if (s.loggedIn) return startApp();
+  setupMode = s.setup;
+  if (setupMode) {
+    $('#loginSub').textContent = 'Welcome! Choose a password for this app. You will use it on every device.';
+    $('#pwLabel').textContent = 'New password (8+ characters)';
+    $('#pw').autocomplete = 'new-password';
+    $('#pw2Wrap').classList.remove('hidden');
+    $('#loginBtn').textContent = 'Create password';
+  }
+  showLogin();
+  $('#pw').focus();
+}
+
+async function startApp() {
+  $('#login').classList.add('hidden');
+  $('#app').classList.remove('hidden');
+  state.accounts = await api('/accounts');
+  renderChips();
+  if (!state.accounts.length) { renderFeed(); openSettings(); return; }
+  loadFeed();
+}
+
+// ---------- feed ----------
+const acctOf = (id) => state.accounts.find((a) => a.id === id) || { color: '#888', email: '?' };
+const acctLabel = (a) => a.name || a.email;
+
+async function loadFeed(force = false) {
+  if (state.loading) return;
+  state.loading = true;
+  $('#refreshBtn').classList.add('spin');
+  try {
+    const data = await api('/feed' + (force ? '?refresh=1' : ''));
+    state.items = data.items; state.status = data.status;
+    renderChips(); renderFeed();
+  } catch (err) { if (err.message !== 'Not logged in') toast(err.message); }
+  state.loading = false;
+  $('#refreshBtn').classList.remove('spin');
+}
+
+function renderChips() {
+  const unread = (id) => state.items.filter((i) => !i.seen && (id === 'all' || i.acct === id)).length;
+  const chip = (id, label, color) => {
+    const n = unread(id);
+    return `<button class="chip ${state.filter === id ? 'on' : ''}" data-f="${id}">
+      ${color ? `<span class="dot" style="background:${color}"></span>` : ''}${esc(label)}${n ? ` <span class="count">${n}</span>` : ''}</button>`;
+  };
+  $('#chips').innerHTML = chip('all', 'All') + state.accounts.map((a) => chip(a.id, acctLabel(a), a.color)).join('');
+  const errs = state.accounts.filter((a) => state.status[a.id]?.error);
+  $('#banners').innerHTML = errs.map((a) => `<div class="banner"><b>${esc(acctLabel(a))}:</b> ${esc(state.status[a.id].error)}</div>`).join('');
+}
+$('#chips').addEventListener('click', (e) => {
+  const b = e.target.closest('.chip'); if (!b) return;
+  state.filter = b.dataset.f; renderChips(); renderFeed();
+});
+
+function initials(from) {
+  const s = (from?.name || from?.address || '?').replace(/["']/g, '').trim();
+  const parts = s.split(/[\s@._-]+/).filter(Boolean);
+  return ((parts[0]?.[0] || '?') + (parts[1]?.[0] || '')).toUpperCase();
+}
+
+function fmtWhen(iso) {
+  const d = new Date(iso), now = new Date();
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (now - d < 6 * 864e5) return d.toLocaleDateString([], { weekday: 'short' });
+  return d.toLocaleDateString([], { day: 'numeric', month: 'short', ...(d.getFullYear() !== now.getFullYear() && { year: 'numeric' }) });
+}
+
+function dayLabel(iso) {
+  const d = new Date(iso), now = new Date();
+  const days = Math.floor((new Date(now.toDateString()) - new Date(d.toDateString())) / 864e5);
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return d.toLocaleDateString([], { weekday: 'long' });
+  return d.toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+function renderFeed() {
+  const items = state.items.filter((i) => state.filter === 'all' || i.acct === state.filter);
+  if (!state.accounts.length) {
+    $('#feed').innerHTML = `<div class="empty">No accounts yet.<br><br><button class="btn" onclick="openSettings()">Add an email account</button></div>`;
+    return;
+  }
+  if (!items.length) { $('#feed').innerHTML = `<div class="empty">${state.loading ? 'Loading…' : 'Nothing here.'}</div>`; return; }
+  let html = '', lastDay = '';
+  for (const it of items) {
+    const day = dayLabel(it.date);
+    if (day !== lastDay) { html += `<div class="day">${esc(day)}</div>`; lastDay = day; }
+    const a = acctOf(it.acct);
+    const active = state.current && state.current.acct === it.acct && state.current.uid === it.uid;
+    html += `<button class="card ${it.seen ? '' : 'unread'} ${active ? 'active' : ''}" style="--acct:${a.color}" data-id="${esc(it.id)}">
+      <div class="row">
+        <div class="avatar">${esc(initials(it.from))}</div>
+        <div class="who"><div class="name">${esc(it.from?.name || it.from?.address || 'Unknown')}</div>
+          <div class="acct">to ${esc(acctLabel(a))}</div></div>
+        <div class="when">${esc(fmtWhen(it.date))}</div>
+      </div>
+      <div class="subject">${esc(it.subject)}<span class="tags">${it.attach ? '📎' : ''}${it.answered ? '↩︎' : ''}</span></div>
+      ${it.preview ? `<div class="preview">${esc(it.preview)}</div>` : ''}
+    </button>`;
+  }
+  $('#feed').innerHTML = html;
+}
+$('#feed').addEventListener('click', (e) => {
+  const c = e.target.closest('.card'); if (!c) return;
+  const it = state.items.find((i) => i.id === c.dataset.id);
+  if (it) openMessage(it);
+});
+
+// ---------- reader ----------
+const linkify = (s) => esc(s).replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+const fmtAddr = (a) => a ? (a.name ? `${a.name} <${a.address}>` : a.address) : '';
+const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+
+async function openMessage(it) {
+  state.current = { acct: it.acct, uid: it.uid };
+  const r = $('#reader');
+  r.classList.add('open');
+  r.innerHTML = `<div class="reader-top"><button class="icon-btn back" aria-label="Back">←</button><div class="spacer"></div></div>
+    <div class="reader-body"><div class="reader-inner"><p style="color:var(--muted)">Loading…</p></div></div>`;
+  $('.back', r).onclick = closeReader;
+  if (!it.seen) { it.seen = true; renderChips(); }
+  renderFeed();
+  try {
+    const msg = await api(`/msg/${it.acct}/${it.uid}`);
+    if (!state.current || state.current.uid !== it.uid || state.current.acct !== it.acct) return;
+    renderMessage(msg, false);
+  } catch (err) {
+    $('.reader-inner', r).innerHTML = `<p class="err">${esc(err.message)}</p>`;
+  }
+}
+
+function closeReader() {
+  state.current = null;
+  $('#reader').classList.remove('open');
+  $('#reader').innerHTML = `<div class="reader-placeholder">Pick an email from the feed</div>`;
+  renderFeed();
+}
+
+function frameDoc(html, showImages) {
+  const img = showImages ? 'data: cid: https: http:' : 'data: cid:';
+  return `<!doctype html><html><head><meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' https:; img-src ${img}; font-src data: https:;">
+    <base target="_blank">
+    <style>body{margin:16px;font:15px/1.5 system-ui,sans-serif;color:#161a23;background:#fff;word-wrap:break-word}img{max-width:100%;height:auto}table{max-width:100%}</style>
+    </head><body>${html}</body></html>`;
+}
+
+function renderMessage(msg, showImages) {
+  const a = acctOf(msg.acct);
+  const hasRemote = msg.html && /<img[^>]+src=["']?https?:/i.test(msg.html);
+  const r = $('#reader');
+  r.innerHTML = `
+    <div class="reader-top">
+      <button class="icon-btn back" aria-label="Back">←</button>
+      <div class="spacer"></div>
+      <button class="btn ghost" data-act="unread">Mark unread</button>
+      <button class="btn danger" data-act="delete">Delete</button>
+    </div>
+    <div class="reader-body"><div class="reader-inner">
+      <h2>${esc(msg.subject)}</h2>
+      <div class="meta">
+        <div class="avatar" style="--acct:${a.color}">${esc(initials(msg.from))}</div>
+        <div class="lines">
+          <div><b>${esc(msg.from?.name || msg.from?.address || '')}</b> <span class="muted">${esc(msg.from?.name ? msg.from.address : '')}</span></div>
+          <div class="muted">to ${esc(msg.to.map(fmtAddr).join(', ') || acctLabel(a))}${msg.cc.length ? ' · cc ' + esc(msg.cc.map(fmtAddr).join(', ')) : ''}</div>
+          <div class="muted">${esc(new Date(msg.date).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' }))} · in ${esc(acctLabel(a))}</div>
+        </div>
+      </div>
+      ${hasRemote && !showImages ? `<div class="img-note">Images from the internet are hidden to protect your privacy.<button class="btn ghost" data-act="images">Show images</button></div>` : ''}
+      ${msg.html
+        ? `<div class="msg-frame-wrap"><iframe class="msg-frame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe></div>`
+        : `<div class="msg-text">${linkify(msg.text)}</div>`}
+      ${msg.attachments.length ? `<div class="atts">${msg.attachments.map((x) =>
+        `<a class="att" href="/api/msg/${msg.acct}/${msg.uid}/att/${x.idx}">📎 ${esc(x.filename)} <span style="color:var(--muted)">${fmtSize(x.size)}</span></a>`).join('')}</div>` : ''}
+    </div></div>
+    <div class="composer">
+      <textarea id="replyText" placeholder="Write a reply…"></textarea>
+      <div class="actions">
+        <div class="to" id="replyTo">Reply to ${esc(fmtAddr(msg.from))}</div>
+        ${msg.to.length + msg.cc.length > 1 ? `<label style="font-size:13px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="replyAll"> Reply all</label>` : ''}
+        <button class="btn" data-act="send">Send</button>
+      </div>
+    </div>`;
+  $('.back', r).onclick = closeReader;
+
+  const frame = $('.msg-frame', r);
+  if (frame) {
+    const fit = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 'px'; } catch {} };
+    frame.addEventListener('load', () => {
+      fit();
+      frame.contentDocument?.querySelectorAll('img').forEach((img) => img.addEventListener('load', fit));
+      setTimeout(fit, 500);
+    });
+    frame.srcdoc = frameDoc(msg.html, showImages);
+  }
+
+  r.onclick = async (e) => {
+    const b = e.target.closest('[data-act]'); if (!b) return;
+    const act = b.dataset.act;
+    if (act === 'images') return renderMessage(msg, true);
+    if (act === 'unread') {
+      await api(`/msg/${msg.acct}/${msg.uid}/seen`, { method: 'POST', body: { seen: false } }).catch((err) => toast(err.message));
+      const it = state.items.find((i) => i.acct === msg.acct && i.uid === msg.uid);
+      if (it) it.seen = false;
+      renderChips(); closeReader(); return;
+    }
+    if (act === 'delete') {
+      b.disabled = true;
+      try {
+        await api(`/msg/${msg.acct}/${msg.uid}`, { method: 'DELETE' });
+        state.items = state.items.filter((i) => !(i.acct === msg.acct && i.uid === msg.uid));
+        renderChips(); closeReader(); toast('Moved to Trash');
+      } catch (err) { toast(err.message); b.disabled = false; }
+      return;
+    }
+    if (act === 'send') {
+      const body = $('#replyText').value.trim();
+      if (!body) return $('#replyText').focus();
+      b.disabled = true; b.textContent = 'Sending…';
+      try {
+        await api(`/msg/${msg.acct}/${msg.uid}/reply`, { method: 'POST', body: { body, all: !!$('#replyAll')?.checked } });
+        $('#replyText').value = '';
+        const it = state.items.find((i) => i.acct === msg.acct && i.uid === msg.uid);
+        if (it) it.answered = true;
+        renderFeed(); toast('Reply sent');
+      } catch (err) { toast(err.message); }
+      b.disabled = false; b.textContent = 'Send';
+    }
+  };
+  $('#replyText').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('[data-act="send"]', r).click();
+  });
+}
+
+// ---------- settings ----------
+async function openSettings() {
+  const providers = await api('/providers');
+  const back = document.createElement('div');
+  back.className = 'sheet-back';
+  let color = COLORS[state.accounts.length % COLORS.length];
+  back.innerHTML = `<div class="sheet" role="dialog" aria-label="Accounts">
+    <div style="display:flex;align-items:center"><h2 style="flex:1">Accounts</h2><button class="icon-btn" data-close aria-label="Close">✕</button></div>
+    <div id="acctList"></div>
+    <h3>Add an account</h3>
+    <form id="addForm">
+      <label class="field"><span>Provider</span><select name="provider">${providers.map((p) => `<option value="${p.id}">${esc(p.label)}</option>`).join('')}</select></label>
+      <div class="hint" id="provHint"></div>
+      <label class="field"><span>Email address</span><input name="email" type="email" autocomplete="off" required></label>
+      <label class="field"><span>App password</span><input name="password" type="password" autocomplete="new-password" required></label>
+      <label class="field"><span>Short name (shown in the feed, optional)</span><input name="name" placeholder="e.g. Yahoo perso"></label>
+      <div class="field"><span>Colour</span><div class="colors">${COLORS.map((c) => `<button type="button" data-c="${c}" style="background:${c}" class="${c === color ? 'on' : ''}" aria-label="colour"></button>`).join('')}</div></div>
+      <div class="err" id="addErr"></div>
+      <button class="btn wide" id="addBtn">Test &amp; add</button>
+    </form>
+    <h3>This device</h3>
+    <button class="btn ghost" data-logout>Log out</button>
+  </div>`;
+  document.body.append(back);
+
+  const HINTS = {
+    yahoo: 'Use a Yahoo <b>app password</b> (Account security → Generate app password), not your normal password.',
+    aol: 'Use an AOL <b>app password</b> (Account security → Generate app password), not your normal password.',
+    gmx: 'Switch on IMAP first: GMX Settings → POP3 &amp; IMAP → allow access. Use your GMX password, or an app-specific password if you use 2-step login.',
+  };
+  const sel = $('select', back);
+  const hint = () => { $('#provHint', back).innerHTML = HINTS[sel.value] || ''; };
+  sel.onchange = hint; hint();
+
+  const list = () => {
+    $('#acctList', back).innerHTML = state.accounts.length
+      ? state.accounts.map((a) => `<div class="acct-row"><span class="chip"><span class="dot" style="background:${a.color}"></span></span>
+          <div class="info"><div>${esc(acctLabel(a))}</div><div>${esc(a.email)} · ${esc(a.provider.toUpperCase())}</div></div>
+          <button class="btn danger" data-del="${a.id}">Remove</button></div>`).join('')
+      : `<p class="sub">No accounts yet. Add your first one below.</p>`;
+  };
+  list();
+
+  back.addEventListener('click', async (e) => {
+    if (e.target === back || e.target.closest('[data-close]')) { back.remove(); loadFeed(true); return; }
+    const c = e.target.closest('[data-c]');
+    if (c) { color = c.dataset.c; back.querySelectorAll('[data-c]').forEach((x) => x.classList.toggle('on', x === c)); return; }
+    const del = e.target.closest('[data-del]');
+    if (del) {
+      if (del.dataset.confirm !== '1') { del.dataset.confirm = '1'; del.textContent = 'Tap again'; return; }
+      await api('/accounts/' + del.dataset.del, { method: 'DELETE' });
+      state.accounts = state.accounts.filter((a) => a.id !== del.dataset.del);
+      state.items = state.items.filter((i) => i.acct !== del.dataset.del);
+      list(); renderChips(); renderFeed();
+      return;
+    }
+    if (e.target.closest('[data-logout]')) { await api('/logout', { method: 'POST' }); location.reload(); }
+  });
+
+  $('#addForm', back).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const btn = $('#addBtn', back);
+    btn.disabled = true; btn.textContent = 'Testing connection…'; $('#addErr', back).textContent = '';
+    try {
+      const acct = await api('/accounts', { method: 'POST', body: { ...Object.fromEntries(f), color } });
+      state.accounts.push(acct);
+      e.target.reset(); hint(); list(); renderChips();
+      toast(`Added ✓ ${acct.messages} emails in inbox`);
+    } catch (err) { $('#addErr', back).textContent = err.message; }
+    btn.disabled = false; btn.textContent = 'Test & add';
+  });
+}
+$('#settingsBtn').onclick = openSettings;
+$('#refreshBtn').onclick = () => loadFeed(true);
+
+// Keep the feed fresh while the app is open.
+setInterval(() => { if (!document.hidden && !$('#app').classList.contains('hidden') && state.accounts.length) loadFeed(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && state.accounts.length && !$('#app').classList.contains('hidden')) loadFeed(); });
+
+boot();
+</script>
+</body>
+</html>
