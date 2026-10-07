@@ -5,6 +5,7 @@ import ICAL from 'ical.js';
 import * as chrono from 'chrono-node';
 import { caldavUrlFor, calendarKind } from './providers.js';
 import { googleEvents, googleCalendars, googleRsvp, googleImport } from './google.js';
+import { outlookEvents } from './microsoft.js';
 
 const CAL_LIST_MS = 30 * 60 * 1000;
 const EVENTS_MS = 2 * 60 * 1000;
@@ -130,8 +131,10 @@ export async function fetchEvents(acct, from, to) {
   const hit = eventCache.get(key);
   if (hit && Date.now() - hit.at < EVENTS_MS) return hit.events;
 
-  if (calendarKind(acct) === 'google') {
-    const events = (await googleEvents(acct, from, to)).map((ev) => ({ ...ev, acct: acct.id }));
+  const kind = calendarKind(acct);
+  if (kind === 'google' || kind === 'microsoft') {
+    const list = kind === 'google' ? await googleEvents(acct, from, to) : await outlookEvents(acct, from, to);
+    const events = list.map((ev) => ({ ...ev, acct: acct.id }));
     eventCache.set(key, { at: Date.now(), events });
     return events;
   }

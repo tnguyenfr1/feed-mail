@@ -11,7 +11,7 @@ let secrets = loadSecrets();
 export const googleConfigured = () => !!(secrets.google?.clientId && secrets.google?.clientSecret);
 
 export function setGoogleClient(clientId, clientSecret) {
-  secrets = { ...secrets, google: { clientId: clientId.trim(), clientSecret: clientSecret.trim() } };
+  secrets = { ...loadSecrets(), google: { clientId: clientId.trim(), clientSecret: clientSecret.trim() } };
   saveSecrets(secrets);
 }
 

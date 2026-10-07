@@ -5,6 +5,8 @@ import { PROVIDERS, caldavUrlFor, calendarKind } from './providers.js';
 import * as mail from './mail.js';
 import * as cal from './calendar.js';
 import * as google from './google.js';
+import * as microsoft from './microsoft.js';
+import * as outlook from './outlook.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -89,36 +91,46 @@ app.post('/api/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- Google sign-in (browser redirects, so outside /api) ----------
+// ---------- Google / Microsoft sign-in (browser redirects, so outside /api) ----------
 
-const googleRedirect = (req) =>
-  `https://${process.env.PUBLIC_HOST || req.headers['x-forwarded-host'] || req.headers.host}/oauth/google/callback`;
+const OAUTH = {
+  google: { mod: google, provider: 'gmail', configured: () => google.googleConfigured(), colors: ['#ea4335', '#3b6cf6', '#16a34a', '#ca8a04', '#7c3aed'] },
+  microsoft: { mod: microsoft, provider: 'outlook', configured: () => microsoft.microsoftConfigured(), colors: ['#0078d4', '#0891b2', '#7c3aed', '#16a34a'] },
+};
 
-app.get('/oauth/google/start', (req, res) => {
-  if (!loggedIn(req) || !google.googleConfigured()) return res.redirect('/');
+// Microsoft rotates refresh tokens; keep the newest one on disk.
+microsoft.onRefreshTokenChange(() => saveAccounts(accounts));
+
+const oauthRedirect = (req, kind) =>
+  `https://${process.env.PUBLIC_HOST || req.headers['x-forwarded-host'] || req.headers.host}/oauth/${kind}/callback`;
+
+app.get('/oauth/:kind/start', (req, res) => {
+  const o = OAUTH[req.params.kind];
+  if (!o || !loggedIn(req) || !o.configured()) return res.redirect('/');
   const state = crypto.randomBytes(16).toString('hex');
-  // Lax so the cookie survives the trip to Google and back; the session cookie is Strict.
+  // Lax so the cookie survives the trip to the provider and back; the session cookie is Strict.
   res.cookie('fm_oauth', state, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 15 * 60 * 1000, path: '/oauth' });
-  res.redirect(google.authUrl(googleRedirect(req), state));
+  res.redirect(o.mod.authUrl(oauthRedirect(req, req.params.kind), state));
 });
 
-app.get('/oauth/google/callback', async (req, res) => {
+app.get('/oauth/:kind/callback', async (req, res) => {
   const back = (msg) => res.type('html').send(
     `<!doctype html><meta charset="utf-8"><script>location.replace(${JSON.stringify('/?' + msg)})</script>`);
+  const o = OAUTH[req.params.kind];
+  if (!o) return back('oauthError=' + encodeURIComponent('Unknown sign-in.'));
   const state = readCookie(req, 'fm_oauth');
   res.clearCookie('fm_oauth', { path: '/oauth' });
   if (!state || state !== req.query.state) return back('oauthError=' + encodeURIComponent('Sign-in expired, please try again.'));
-  if (req.query.error) return back('oauthError=' + encodeURIComponent('Google sign-in was cancelled.'));
+  if (req.query.error) return back('oauthError=' + encodeURIComponent('Sign-in was cancelled.'));
   try {
-    const { email, refreshToken } = await google.exchangeCode(String(req.query.code || ''), googleRedirect(req));
-    const existing = accounts.find((a) => a.provider === 'gmail' && a.email.toLowerCase() === email.toLowerCase());
-    const COLORS = ['#ea4335', '#3b6cf6', '#16a34a', '#ca8a04', '#7c3aed'];
+    const { email, refreshToken } = await o.mod.exchangeCode(String(req.query.code || ''), oauthRedirect(req, req.params.kind));
+    const existing = accounts.find((a) => a.provider === o.provider && a.email.toLowerCase() === email.toLowerCase());
     const acct = existing
       ? { ...existing, oauth: { refreshToken } }
-      : { id: crypto.randomBytes(4).toString('hex'), provider: 'gmail', email, oauth: { refreshToken }, name: '',
-          color: COLORS[accounts.filter((a) => a.provider === 'gmail').length % COLORS.length] };
+      : { id: crypto.randomBytes(4).toString('hex'), provider: o.provider, email, oauth: { refreshToken }, name: '',
+          color: o.colors[accounts.filter((a) => a.provider === o.provider).length % o.colors.length] };
     mail.dropClient(acct.id);
-    google.forgetToken(acct.id);
+    o.mod.forgetToken(acct.id);
     cal.forgetCalendar(acct.id);
     await mail.testLogin(acct);
     if (existing) Object.assign(existing, acct);
@@ -126,14 +138,14 @@ app.get('/oauth/google/callback', async (req, res) => {
     saveAccounts(accounts);
     back('added=' + encodeURIComponent(email));
   } catch (err) {
-    console.error('google callback', err.message);
+    console.error(req.params.kind, 'callback', err.message);
     back('oauthError=' + encodeURIComponent(err.message));
   }
 });
 
 app.use('/api', (req, res, next) => (loggedIn(req) ? next() : res.status(401).json({ error: 'Not logged in' })));
 
-app.get('/api/google', (req, res) => res.json({ configured: google.googleConfigured(), redirectUri: googleRedirect(req) }));
+app.get('/api/google', (req, res) => res.json({ configured: google.googleConfigured(), redirectUri: oauthRedirect(req, 'google') }));
 
 app.post('/api/google', (req, res) => {
   const clientId = String(req.body.clientId || '').trim();
@@ -141,6 +153,21 @@ app.post('/api/google', (req, res) => {
   if (!/\.apps\.googleusercontent\.com$/.test(clientId)) return res.status(400).json({ error: 'The Client ID should end with .apps.googleusercontent.com' });
   if (clientSecret.length < 10) return res.status(400).json({ error: 'Paste the Client secret too.' });
   google.setGoogleClient(clientId, clientSecret);
+  res.json({ ok: true });
+});
+
+app.get('/api/microsoft', (req, res) => res.json({ configured: microsoft.microsoftConfigured(), redirectUri: oauthRedirect(req, 'microsoft') }));
+
+app.post('/api/microsoft', (req, res) => {
+  const clientId = String(req.body.clientId || '').trim();
+  const clientSecret = String(req.body.clientSecret || '').trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientId)) {
+    return res.status(400).json({ error: 'The Application (client) ID looks like 1234abcd-12ab-34cd-56ef-1234567890ab.' });
+  }
+  if (clientSecret.length < 20 || /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(clientSecret)) {
+    return res.status(400).json({ error: 'Paste the secret\'s Value (not the Secret ID).' });
+  }
+  microsoft.setMicrosoftClient(clientId, clientSecret);
   res.json({ ok: true });
 });
 
@@ -203,6 +230,7 @@ app.delete('/api/accounts/:id', (req, res, next) => {
     mail.dropClient(req.params.id);
     cal.forgetCalendar(req.params.id);
     google.forgetToken(req.params.id);
+    microsoft.forgetToken(req.params.id);
     cache.delete(req.params.id);
     res.json({ ok: true });
   } catch (err) { next(err); }
@@ -250,7 +278,7 @@ app.get('/api/thread/:acct/:key', async (req, res, next) => {
 });
 
 function patchCached(acctId, uid, fn) {
-  const it = cache.get(acctId)?.items?.find((x) => x.uid === Number(uid));
+  const it = cache.get(acctId)?.items?.find((x) => String(x.uid) === String(uid));
   if (it) fn(it);
 }
 
@@ -291,7 +319,7 @@ app.delete('/api/msg/:acct/:uid', async (req, res, next) => {
   try {
     await mail.deleteMessage(findAccount(req.params.acct), req.params.uid);
     const e = cache.get(req.params.acct);
-    if (e?.items) e.items = e.items.filter((x) => x.uid !== Number(req.params.uid));
+    if (e?.items) e.items = e.items.filter((x) => String(x.uid) !== String(req.params.uid));
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -352,6 +380,9 @@ app.post('/api/msg/:acct/:uid/rsvp', async (req, res, next) => {
     const partstat = String(req.body.response || '').toUpperCase();
     if (!RSVP[partstat]) return res.status(400).json({ error: 'Bad response' });
     const acct = findAccount(req.params.acct);
+    if (acct.provider === 'outlook') {
+      return res.json({ ok: true, savedTo: await outlook.rsvp(acct, req.params.uid, partstat), calendarError: null });
+    }
     const { ics, parsed } = await mail.getInviteIcs(acct, req.params.uid);
     if (await cal.rsvpViaProvider(acct, ics, partstat).catch(() => false)) {
       return res.json({ ok: true, savedTo: 'Google Calendar', calendarError: null });

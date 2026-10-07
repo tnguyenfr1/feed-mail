@@ -499,7 +499,7 @@ const linkify = (s) => esc(s).replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, 
 const fmtAddr = (a) => a ? (a.name ? `${a.name} <${a.address}>` : a.address) : '';
 const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
 const fmtLong = (iso) => new Date(iso).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-const msgUrl = (m, extra = '') => `/msg/${m.acct}/${m.uid}${extra}${m.box === 'sent' ? '?box=sent' : ''}`;
+const msgUrl = (m, extra = '') => `/msg/${m.acct}/${encodeURIComponent(m.uid)}${extra}${m.box === 'sent' ? '?box=sent' : ''}`;
 
 async function openConversation(g) {
   const latest = g.latest;
@@ -745,7 +745,7 @@ function setupComposer(conv) {
       b.disabled = true;
       try {
         const only = conv.msgs[0];
-        const rr = await api(`/sent/${conv.acct}/${only.full.replied.uid}`);
+        const rr = await api(`/sent/${conv.acct}/${encodeURIComponent(only.full.replied.uid)}`);
         bar.insertAdjacentHTML('beforeend', `<div class="my-reply">${linkify(rr.text || '(empty)')}</div>`);
         b.textContent = 'Hide my reply';
       } catch (err) { toast(err.message); }
@@ -755,7 +755,7 @@ function setupComposer(conv) {
     if (act === 'unread') {
       const latest = [...conv.msgs].reverse().find((x) => x.meta.box === 'inbox' && x.meta.uid);
       if (!latest) return;
-      await api(`/msg/${conv.acct}/${latest.meta.uid}/seen`, { method: 'POST', body: { seen: false } }).catch((err) => toast(err.message));
+      await api(`/msg/${conv.acct}/${encodeURIComponent(latest.meta.uid)}/seen`, { method: 'POST', body: { seen: false } }).catch((err) => toast(err.message));
       const it = state.items.find((i) => i.acct === conv.acct && i.uid === latest.meta.uid);
       if (it) it.seen = false;
       renderChips(); closeReader(); return;
@@ -764,7 +764,7 @@ function setupComposer(conv) {
       if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Tap again to delete'; return; }
       b.disabled = true;
       try {
-        await api(`/msg/${conv.acct}/${m.meta.uid}`, { method: 'DELETE' });
+        await api(`/msg/${conv.acct}/${encodeURIComponent(m.meta.uid)}`, { method: 'DELETE' });
         state.items = state.items.filter((i) => !(i.acct === conv.acct && i.uid === m.meta.uid));
         conv.msgs = conv.msgs.filter((x) => x !== m);
         renderChips(); toast('Moved to Trash');
@@ -781,7 +781,7 @@ function setupComposer(conv) {
       b.disabled = true; b.textContent = 'Sending…';
       try {
         const attachments = await Promise.all(files.map(async (f) => ({ filename: f.name, contentType: f.type, data: await fileToBase64(f) })));
-        await api(`/msg/${conv.acct}/${t.meta.uid}/reply${t.meta.box === 'sent' ? '?box=sent' : ''}`,
+        await api(`/msg/${conv.acct}/${encodeURIComponent(t.meta.uid)}/reply${t.meta.box === 'sent' ? '?box=sent' : ''}`,
           { method: 'POST', body: { body, all: !!$('#replyAll').checked, attachments } });
         $('#replyText').value = '';
         files.length = 0; renderFiles();
@@ -934,7 +934,7 @@ async function sendRsvp(panel, response) {
   const cs = panel._cs;
   panel.querySelectorAll('[data-rsvp]').forEach((b) => { b.disabled = true; });
   try {
-    const r = await api(`/msg/${cs.msg.acct}/${cs.msg.uid}/rsvp`, { method: 'POST', body: { response } });
+    const r = await api(`/msg/${cs.msg.acct}/${encodeURIComponent(cs.msg.uid)}/rsvp`, { method: 'POST', body: { response } });
     const word = { ACCEPTED: 'Accepted', TENTATIVE: 'Answered maybe', DECLINED: 'Declined' }[response];
     cs.rsvp = { text: `${word} — the organizer has been told.` + (r.savedTo ? ` Added to ${r.savedTo}.` : '') + (r.calendarError ? ` (Could not add to calendar: ${r.calendarError})` : ''), bad: !!r.calendarError };
     toast(word + ' ✓');
@@ -956,6 +956,8 @@ async function openSettings() {
     <div id="acctList"></div>
     <h3>Gmail + Google Calendar</h3>
     <div id="googleBox"></div>
+    <h3>Outlook / Hotmail + Outlook Calendar</h3>
+    <div id="msBox"></div>
     <h3>Add another account</h3>
     <form id="addForm">
       <label class="field"><span>Provider</span><select name="provider">${providers.filter((p) => !p.oauth).map((p) => `<option value="${p.id}">${esc(p.label)}</option>`).join('')}</select></label>
@@ -981,38 +983,46 @@ async function openSettings() {
   const hint = () => { $('#provHint', back).innerHTML = HINTS[sel.value] || ''; };
   sel.onchange = hint; hint();
 
-  const googleBox = async (forceForm = false) => {
-    const g = await api('/google');
-    const box = $('#googleBox', back);
+  const OAUTH_UI = {
+    google: { box: '#googleBox', name: 'Google', idLabel: 'Client ID', idPlaceholder: '….apps.googleusercontent.com', secretLabel: 'Client secret',
+      where: 'from your Google Cloud project', warn: "Google will warn that the app isn't verified: choose <b>Advanced → Go to Feed Mail</b>." },
+    microsoft: { box: '#msBox', name: 'Microsoft', idLabel: 'Application (client) ID', idPlaceholder: '1234abcd-…', secretLabel: 'Client secret Value',
+      where: 'from your Azure app registration (use the secret\'s <b>Value</b>, not its Secret ID)', warn: 'Microsoft will ask you to allow Feed Mail to read and send mail and use your calendar.' },
+  };
+  const oauthBox = async (kind, forceForm = false) => {
+    const ui = OAUTH_UI[kind];
+    const g = await api('/' + kind);
+    const box = $(ui.box, back);
     if (g.configured && !forceForm) {
-      box.innerHTML = `<a class="btn wide" style="display:block;text-align:center;text-decoration:none" href="/oauth/google/start">Sign in with Google</a>
-        <p class="sub" style="margin-top:8px">Connects a Gmail inbox and its Google Calendar. Google will warn that the app isn't verified: choose <b>Advanced → Go to Feed Mail</b>. <a href="#" data-gkeys style="color:var(--accent)">Change Google keys</a></p>`;
+      box.innerHTML = `<a class="btn wide" style="display:block;text-align:center;text-decoration:none" href="/oauth/${kind}/start">Sign in with ${ui.name}</a>
+        <p class="sub" style="margin-top:8px">${ui.warn} <a href="#" data-keys="${kind}" style="color:var(--accent)">Change ${ui.name} keys</a></p>`;
       return;
     }
-    box.innerHTML = `<div class="hint">One-time setup: paste the <b>Client ID</b> and <b>Client secret</b> from your Google Cloud project.
+    box.innerHTML = `<div class="hint">One-time setup: paste the <b>${ui.idLabel}</b> and <b>${ui.secretLabel}</b> ${ui.where}.
         The redirect URI there must be exactly:<br><code style="word-break:break-all">${esc(g.redirectUri)}</code></div>
-      <form id="gForm">
-        <label class="field"><span>Client ID</span><input name="clientId" autocomplete="off" placeholder="….apps.googleusercontent.com" required></label>
-        <label class="field"><span>Client secret</span><input name="clientSecret" type="password" autocomplete="off" required></label>
-        <div class="err" id="gErr"></div>
-        <button class="btn wide">Save Google keys</button>
+      <form data-keysform="${kind}">
+        <label class="field"><span>${ui.idLabel}</span><input name="clientId" autocomplete="off" placeholder="${ui.idPlaceholder}" required></label>
+        <label class="field"><span>${ui.secretLabel}</span><input name="clientSecret" type="password" autocomplete="off" required></label>
+        <div class="err"></div>
+        <button class="btn wide">Save ${ui.name} keys</button>
       </form>`;
-    $('#gForm', box).addEventListener('submit', async (e) => {
+    $('form', box).addEventListener('submit', async (e) => {
       e.preventDefault();
       try {
-        await api('/google', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) });
-        toast('Google keys saved ✓'); googleBox();
-      } catch (err) { $('#gErr', box).textContent = err.message; }
+        await api('/' + kind, { method: 'POST', body: Object.fromEntries(new FormData(e.target)) });
+        toast(`${ui.name} keys saved ✓`); oauthBox(kind);
+      } catch (err) { $('.err', e.target).textContent = err.message; }
     });
   };
-  googleBox();
+  oauthBox('google');
+  oauthBox('microsoft');
 
   const list = () => {
     $('#acctList', back).innerHTML = state.accounts.length
       ? state.accounts.map((a) => `<div class="acct-row"><span class="chip"><span class="dot" style="background:${a.color}"></span></span>
           <div class="info"><div>${esc(acctLabel(a))}</div><div>${esc(a.email)} · ${esc(a.provider.toUpperCase())}</div></div>
           <button class="btn danger" data-del="${a.id}">Remove</button></div>
-          ${a.provider === 'gmail' ? `<div style="padding:4px 0 6px"><a class="btn ghost" style="padding:6px 12px;font-size:13px;text-decoration:none;display:inline-block" href="/oauth/google/start">Reconnect Google</a></div>` : ''}
+          ${a.provider === 'gmail' || a.provider === 'outlook' ? `<div style="padding:4px 0 6px"><a class="btn ghost" style="padding:6px 12px;font-size:13px;text-decoration:none;display:inline-block" href="/oauth/${a.provider === 'gmail' ? 'google' : 'microsoft'}/start">Reconnect ${a.provider === 'gmail' ? 'Google' : 'Microsoft'}</a></div>` : ''}
           ${a.calPasswordAllowed ? `<form class="calpw" data-acct="${a.id}" style="display:flex;gap:8px;padding:8px 0 4px;align-items:center">
             <input type="password" name="calPassword" autocomplete="new-password" placeholder="${a.hasCalPassword ? 'Calendar password saved ✓ (type to change)' : 'Calendar password (only if different)'}"
               style="flex:1;min-width:0;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg)">
@@ -1034,7 +1044,8 @@ async function openSettings() {
       list(); renderChips(); renderFeed();
       return;
     }
-    if (e.target.closest('[data-gkeys]')) { e.preventDefault(); googleBox(true); return; }
+    const k = e.target.closest('[data-keys]');
+    if (k) { e.preventDefault(); oauthBox(k.dataset.keys, true); return; }
     if (e.target.closest('[data-logout]')) { await api('/logout', { method: 'POST' }); location.reload(); }
   });
 

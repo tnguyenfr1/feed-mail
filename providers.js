@@ -22,6 +22,10 @@ export const PROVIDERS = {
     appendSent: false, // Gmail files sent mail itself
     oauth: 'google',
   },
+  outlook: {
+    label: 'Outlook',
+    oauth: 'microsoft', // mail goes through Microsoft Graph, not IMAP
+  },
   gmx: {
     label: 'GMX',
     imap: { host: 'imap.gmx.com', port: 993, secure: true },
@@ -61,5 +65,6 @@ export function serversFor(account) {
 // Calendar backend for an account: 'caldav', 'google', or null.
 export function calendarKind(account) {
   if (PROVIDERS[account.provider]?.oauth === 'google') return 'google';
+  if (PROVIDERS[account.provider]?.oauth === 'microsoft') return 'microsoft';
   return caldavUrlFor(account) ? 'caldav' : null;
 }

@@ -7,6 +7,9 @@ import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import { serversFor } from './providers.js';
 import { parseInvite, findDates } from './calendar.js';
 import { accessToken } from './google.js';
+import * as outlook from './outlook.js';
+
+const viaGraph = (acct) => acct.provider === 'outlook';
 
 const FEED_SIZE = 50; // newest messages per account
 const PREVIEW_BYTES = 20000; // enough of each message to build a preview
@@ -52,6 +55,7 @@ async function getClient(acct) {
 }
 
 export function dropClient(acctId) {
+  outlook.dropOutlook(acctId);
   known.delete(acctId);
   sentCache.delete(acctId);
   const p = clients.get(acctId);
@@ -178,6 +182,8 @@ function assignThreads(items) {
 }
 
 export async function getThread(acct, key) {
+  if (viaGraph(acct)) return outlook.getThread(acct, key);
+
   const inbox = [...(known.get(acct.id)?.byUid.values() || [])].filter((i) => i.thread === key);
   const sent = (sentCache.get(acct.id)?.items || []).filter((i) => i.thread === key);
   const need = sent.filter((i) => i.preview === undefined);
@@ -220,6 +226,8 @@ function stripQuote(text) {
 }
 
 export async function getSentReply(acct, uid) {
+  if (viaGraph(acct)) return outlook.getSentReply(acct, uid);
+
   const msg = await getMessage(acct, uid, 'sent');
   return { date: msg.date, to: msg.to, text: stripQuote(msg.text || '') };
 }
@@ -242,6 +250,8 @@ function friendly(err) {
 }
 
 export async function testLogin(acct) {
+  if (viaGraph(acct)) return outlook.testLogin(acct);
+
   const c = await newClient(acct);
   try {
     await c.connect();
@@ -278,6 +288,8 @@ function addr(a) {
 const known = new Map(); // account id -> { validity, byUid: Map(uid -> item) }
 
 export async function fetchFeed(acct) {
+  if (viaGraph(acct)) return outlook.fetchFeed(acct);
+
   const { flags, fresh, validity } = await withInbox(acct, async (c) => {
     const exists = c.mailbox.exists;
     const validity = String(c.mailbox.uidValidity);
@@ -373,6 +385,8 @@ async function fetchParsed(acct, uid, c) {
 const list = (v) => (v ? v.value || [] : []).map(addr);
 
 export async function getMessage(acct, uid, box = 'inbox') {
+  if (viaGraph(acct)) return outlook.getMessage(acct, uid, box);
+
   const { parsed } = await withMailbox(acct, await boxPath(acct, box), async (c) => {
     const r = await fetchParsed(acct, uid, c);
     if (box === 'inbox' && !r.flags?.has('\\Seen')) await c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
@@ -454,6 +468,8 @@ export async function sendInviteReply(acct, parsed, icsReply, label) {
 }
 
 export async function getAttachment(acct, uid, idx, box = 'inbox') {
+  if (viaGraph(acct)) return outlook.getAttachment(acct, uid, idx);
+
   const { parsed } = await withMailbox(acct, await boxPath(acct, box), (c) => fetchParsed(acct, uid, c));
   const a = parsed.attachments[Number(idx)];
   if (!a) {
@@ -470,6 +486,8 @@ async function findSpecial(c, use) {
 }
 
 export async function setSeen(acct, uid, seen) {
+  if (viaGraph(acct)) return outlook.setSeen(acct, uid, seen);
+
   await withInbox(acct, (c) =>
     seen
       ? c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true })
@@ -477,6 +495,8 @@ export async function setSeen(acct, uid, seen) {
 }
 
 export async function deleteMessage(acct, uid) {
+  if (viaGraph(acct)) return outlook.deleteMessage(acct, uid);
+
   await withInbox(acct, async (c) => {
     const trash = await findSpecial(c, '\\Trash');
     if (trash) await c.messageMove(String(uid), trash, { uid: true });
@@ -508,6 +528,8 @@ export function replyRecipients(acct, parsed, box, all) {
 }
 
 export async function sendReply(acct, uid, { body, all, attachments = [], box = 'inbox' }) {
+  if (viaGraph(acct)) return outlook.sendReply(acct, uid, { body, all, attachments, box });
+
   const servers = serversFor(acct);
   const { parsed } = await withMailbox(acct, await boxPath(acct, box), (c) => fetchParsed(acct, uid, c));
   const { to, cc } = replyRecipients(acct, parsed, box, all);
