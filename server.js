@@ -164,7 +164,7 @@ app.post('/api/microsoft', (req, res) => {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientId)) {
     return res.status(400).json({ error: 'The Application (client) ID looks like 1234abcd-12ab-34cd-56ef-1234567890ab.' });
   }
-  if (clientSecret.length < 20 || /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(clientSecret)) {
+  if (clientSecret.length < 30 || /\s/.test(clientSecret) || /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(clientSecret)) {
     return res.status(400).json({ error: 'Paste the secret\'s Value (not the Secret ID).' });
   }
   microsoft.setMicrosoftClient(clientId, clientSecret);
