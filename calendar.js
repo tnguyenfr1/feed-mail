@@ -216,7 +216,8 @@ export async function addToCalendar(acct, ics, partstat) {
   for (const v of root.getAllSubcomponents('vevent')) setMyStatus(v, acct.email, partstat);
   const uid = root.getFirstSubcomponent('vevent').getFirstPropertyValue('uid') || icsStamp();
   const filename = uid.replace(/[^\w.-]/g, '_').slice(0, 120) + '.ics';
-  const cal = calendars[0];
+  // Avoid special calendars like GMX's "Birthdays" when choosing where to save.
+  const cal = calendars.find((c) => !/birthday|anniversaire|geburtstag|holiday|férié/i.test(c.displayName || '')) || calendars[0];
   const iCalString = root.toString();
   let res = await client.createCalendarObject({ calendar: cal, filename, iCalString });
   if (!res.ok) {
