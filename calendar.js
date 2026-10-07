@@ -8,15 +8,15 @@ import { googleEvents, googleCalendars, googleRsvp, googleImport } from './googl
 import { outlookEvents } from './microsoft.js';
 
 const CAL_LIST_MS = 30 * 60 * 1000;
-const EVENTS_MS = 2 * 60 * 1000;
+const EVENTS_MS = 5 * 60 * 1000;
 const MAX_OCCURRENCES = 400;
 
 const clients = new Map(); // account id -> { at, promise: { client, calendars } }
-const eventCache = new Map(); // `${acct}|${from}|${to}` -> { at, events }
+const windows = new Map(); // account id -> { at, from, to, events, pending, error }
 
 export function forgetCalendar(acctId) {
   clients.delete(acctId);
-  for (const k of eventCache.keys()) if (k.startsWith(acctId + '|')) eventCache.delete(k);
+  windows.delete(acctId);
 }
 
 const calPassword = (acct) => acct.calPassword || acct.password;
@@ -126,19 +126,12 @@ function eventsFromIcs(ics, from, to) {
   return out;
 }
 
-export async function fetchEvents(acct, from, to) {
-  const key = `${acct.id}|${from.toISOString()}|${to.toISOString()}`;
-  const hit = eventCache.get(key);
-  if (hit && Date.now() - hit.at < EVENTS_MS) return hit.events;
-
+async function loadEvents(acct, from, to) {
   const kind = calendarKind(acct);
   if (kind === 'google' || kind === 'microsoft') {
     const list = kind === 'google' ? await googleEvents(acct, from, to) : await outlookEvents(acct, from, to);
-    const events = list.map((ev) => ({ ...ev, acct: acct.id }));
-    eventCache.set(key, { at: Date.now(), events });
-    return events;
+    return list.map((ev) => ({ ...ev, acct: acct.id }));
   }
-
   const { client, calendars } = await getCal(acct);
   const events = [];
   // Ask the server for a slightly wider window so recurring masters are included.
@@ -151,8 +144,55 @@ export async function fetchEvents(acct, from, to) {
       }
     }
   }
-  eventCache.set(key, { at: Date.now(), events });
   return events;
+}
+
+// Each account's events from two weeks ago to four months ahead stay in
+// memory and refresh in the background, so the calendar strip is instant.
+const WINDOW_BACK_DAYS = 14;
+const WINDOW_AHEAD_DAYS = 120;
+
+function currentWindow() {
+  const from = new Date(); from.setHours(0, 0, 0, 0); from.setDate(from.getDate() - WINDOW_BACK_DAYS);
+  const to = new Date(from); to.setDate(to.getDate() + WINDOW_BACK_DAYS + WINDOW_AHEAD_DAYS);
+  return { from, to };
+}
+
+function loadWindow(acct) {
+  const w = windows.get(acct.id) || {};
+  if (w.pending) return w.pending;
+  const { from, to } = currentWindow();
+  w.pending = loadEvents(acct, from, to)
+    .then((events) => Object.assign(w, { at: Date.now(), from, to, events, error: null }))
+    .catch((err) => { w.error = err; if (!w.events) throw err; return w; })
+    .finally(() => { w.pending = null; });
+  windows.set(acct.id, w);
+  return w.pending;
+}
+
+export function warmCalendar(acct) {
+  return loadWindow(acct).catch(() => {});
+}
+
+const overlapsRange = (ev, from, to) => {
+  const s = ev.allDay ? new Date(ev.start + 'T00:00:00') : new Date(ev.start);
+  const e = ev.allDay ? new Date(ev.end + 'T00:00:00') : new Date(ev.end);
+  return (e > from || (ev.allDay && +e === +s && s >= from)) && s < to;
+};
+
+export async function fetchEvents(acct, from, to) {
+  let w = windows.get(acct.id);
+  const inside = (x) => x?.events && x.from <= from && to <= x.to;
+  if (!inside(w)) {
+    const { from: wf, to: wt } = currentWindow();
+    if (from < wf || to > wt) return loadEvents(acct, from, to); // far away: ask directly
+    w = await loadWindow(acct);
+  } else if (Date.now() - w.at > EVENTS_MS) {
+    loadWindow(acct).catch(() => {}); // stale: answer now, refresh behind the scenes
+  }
+  if (w.error && !w.events) throw w.error;
+  // A day of slack each side: the browser does the exact day check in its own time zone.
+  return w.events.filter((ev) => overlapsRange(ev, new Date(from - 864e5), new Date(+to + 864e5)));
 }
 
 // ---------- invites inside emails ----------

@@ -379,6 +379,8 @@ async function loadFeed(force = false) {
     const data = await api('/feed' + (force ? '?refresh=1' : ''));
     state.items = data.items; state.status = data.status;
     renderChips(); renderFeed();
+    // Some inbox was still refreshing on the Pi: pick up its news shortly.
+    if (Object.values(data.status).some((x) => x.loading)) setTimeout(() => loadFeed(), 4000);
   } catch (err) { if (err.message !== 'Not logged in') toast(err.message); }
   state.loading = false;
   $('#refreshBtn').classList.remove('spin');
@@ -514,6 +516,8 @@ async function openConversation(g) {
   for (const x of g.items) x.seen = true;
   renderChips(); renderFeed();
 
+  // Start loading the newest message while the conversation list loads.
+  conv.prefetch = { uid: latest.uid, promise: api(msgUrl({ ...latest, box: 'inbox' })).catch((err) => ({ error: err.message })) };
   let list = g.items.slice().reverse().map((x) => ({ ...x, box: 'inbox' }));
   if (state.view === 'conv' && (g.items.length > 1 || latest.threadSent)) {
     try { list = await api(`/thread/${latest.acct}/${encodeURIComponent(latest.thread)}`); } catch {}
@@ -666,7 +670,13 @@ function renderThread(conv) {
 async function loadFull(conv, m) {
   if (!m.meta.uid) return;
   try {
-    m.full = await api(msgUrl({ ...m.meta, acct: conv.acct }));
+    const pre = conv.prefetch;
+    if (pre && m.meta.box === 'inbox' && String(pre.uid) === String(m.meta.uid)) {
+      conv.prefetch = null;
+      m.full = await pre.promise;
+    } else {
+      m.full = await api(msgUrl({ ...m.meta, acct: conv.acct }));
+    }
   } catch (err) { m.full = { error: err.message }; }
   if (state.current !== conv) return;
   renderThread(conv);

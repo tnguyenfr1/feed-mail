@@ -12,6 +12,7 @@
   "type": "module",
   "dependencies": {
     "chrono-node": "^2.10.2",
+    "compression": "^1.8.2",
     "express": "^5.2.1",
     "ical.js": "^2.2.1",
     "imapflow": "^2.2.7",

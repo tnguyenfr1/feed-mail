@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import express from 'express';
+import compression from 'compression';
 import { loadAccounts, saveAccounts, loadConfig, saveConfig } from './store.js';
 import { PROVIDERS, caldavUrlFor, calendarKind } from './providers.js';
 import * as mail from './mail.js';
@@ -20,6 +21,7 @@ const cache = new Map(); // account id -> { at, items, error, pending }
 
 const app = express();
 app.disable('x-powered-by');
+app.use(compression());
 app.use(express.json({ limit: '40mb' })); // replies can carry attachments
 app.use((req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff');
@@ -253,10 +255,13 @@ app.get('/api/feed', async (req, res) => {
   const force = req.query.refresh === '1';
   await Promise.all(accounts.map((a) => {
     const e = cache.get(a.id);
-    if (force || !e || !e.items || Date.now() - e.at > STALE_MS) {
-      // Don't make the page wait forever for one slow server.
-      return Promise.race([refresh(a), new Promise((r) => setTimeout(r, 20000))]);
+    if (force || !e?.items) {
+      // Nothing to show yet (or the refresh button): wait, but not forever.
+      return Promise.race([refresh(a), new Promise((r) => setTimeout(r, force ? 8000 : 20000))]);
     }
+    // Otherwise answer from memory now and refresh behind the scenes;
+    // the page asks again shortly when something was still loading.
+    if (Date.now() - e.at > STALE_MS) refresh(a);
   }));
   const items = [];
   const status = {};
@@ -405,7 +410,9 @@ app.use(express.static(new URL('./public', import.meta.url).pathname, { index: '
 
 app.listen(PORT, HOST, () => console.log(`Feed Mail on http://${HOST}:${PORT}`));
 
-// Keep every inbox warm in the background so opening the app is instant.
+// Keep every inbox and calendar warm in the background so the app is instant.
 const warm = () => accounts.forEach((a) => refresh(a));
-setTimeout(warm, 2000);
-setInterval(warm, 2 * 60 * 1000);
+const warmCalendars = () => accounts.filter((a) => calendarKind(a)).forEach((a) => cal.warmCalendar(a));
+setTimeout(() => { warm(); warmCalendars(); }, 2000);
+setInterval(warm, 60 * 1000);
+setInterval(warmCalendars, 5 * 60 * 1000);

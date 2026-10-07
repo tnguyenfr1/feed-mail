@@ -110,7 +110,7 @@ const htmlToText = (html) => String(html || '')
 async function loadMessage(acct, id) {
   return graph(acct, `/me/messages/${encodeURIComponent(id)}`, {
     query: {
-      $select: 'id,subject,from,toRecipients,ccRecipients,replyTo,receivedDateTime,sentDateTime,body,hasAttachments,internetMessageId,isRead,parentFolderId,meetingMessageType',
+      $select: 'id,subject,from,toRecipients,ccRecipients,replyTo,receivedDateTime,sentDateTime,body,hasAttachments,internetMessageId,isRead,parentFolderId,meetingMessageType,conversationId',
       $expand: 'attachments($select=id,name,contentType,size,isInline)',
     },
   });
@@ -166,15 +166,13 @@ export async function getMessage(acct, uid, box = 'inbox') {
     } catch {}
   }
 
+  // Use what the last feed refresh learned about my sent mail.
   let replied = null;
-  if (box === 'inbox') {
-    try {
-      const date = utc(m.receivedDateTime);
-      const sent = await sentState(acct);
-      const thread = (await graph(acct, `/me/messages/${encodeURIComponent(uid)}`, { query: { $select: 'conversationId' } })).conversationId;
-      const after = sent.items.filter((s) => s.thread === `o${thread}` && s.date > date).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
-      if (after) replied = { at: after.date, uid: after.uid };
-    } catch {}
+  const sent = sentCache.get(acct.id);
+  if (box === 'inbox' && sent) {
+    const date = utc(m.receivedDateTime);
+    const after = sent.items.filter((s) => s.thread === `o${m.conversationId}` && s.date > date).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
+    if (after) replied = { at: after.date, uid: after.uid };
   }
 
   const date = utc(box === 'sent' ? m.sentDateTime : m.receivedDateTime);

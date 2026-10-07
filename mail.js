@@ -63,9 +63,8 @@ export function dropClient(acctId) {
   p?.then((c) => c.logout().catch(() => c.close())).catch(() => {});
 }
 
-// Some servers (Yahoo) never tell a long-open session about new mail, so
-// re-select INBOX when the view may be stale.
-const RESELECT_MS = 15 * 1000;
+// Some servers (Yahoo) never tell a long-open session about new mail, so the
+// feed asks for a fresh view (fresh: true); other actions reuse the open one.
 
 // Run fn with a mailbox selected; retry once on a dead connection.
 async function withMailbox(acct, path, fn, { fresh = false } = {}, retried = false) {
@@ -73,8 +72,8 @@ async function withMailbox(acct, path, fn, { fresh = false } = {}, retried = fal
   let lock;
   try {
     lock = await c.getMailboxLock(path);
-    // Switching mailbox already re-selects; otherwise refresh a stale view.
-    if (c.fmSelectedPath === path && (fresh || Date.now() - c.fmSelectedAt > RESELECT_MS)) {
+    // Switching mailbox already re-selects; otherwise refresh only when asked.
+    if (c.fmSelectedPath === path && fresh) {
       await c.mailboxOpen(path);
     }
     c.fmSelectedPath = path;
@@ -373,7 +372,12 @@ export async function fetchFeed(acct) {
 }
 
 async function fetchParsed(acct, uid, c) {
-  const m = await c.fetchOne(String(uid), { source: true, flags: true }, { uid: true });
+  let m = await c.fetchOne(String(uid), { source: true, flags: true }, { uid: true });
+  if (!m) {
+    // The open view may predate this message (Yahoo): look again once.
+    await c.mailboxOpen(c.mailbox.path);
+    m = await c.fetchOne(String(uid), { source: true, flags: true }, { uid: true });
+  }
   if (!m) {
     const e = new Error('Message not found (it may have been moved or deleted).');
     e.status = 404;
@@ -411,7 +415,8 @@ export async function getMessage(acct, uid, box = 'inbox') {
   const invite = ics ? parseInvite(ics) : null;
 
   let replied = null;
-  if (box === 'inbox') try { replied = (await sentState(acct)).map.get(parsed.messageId) || null; } catch {}
+  // Use what the last feed refresh learned; don't rescan Sent just to open a message.
+  if (box === 'inbox') replied = sentCache.get(acct.id)?.map.get(parsed.messageId) || null;
 
   return {
     acct: acct.id,
