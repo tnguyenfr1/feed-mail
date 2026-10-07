@@ -532,6 +532,36 @@ export function replyRecipients(acct, parsed, box, all) {
   return { to, cc };
 }
 
+// A brand-new email (not a reply).
+export async function sendNew(acct, { to, cc = [], bcc = [], subject, body, attachments = [] }) {
+  if (viaGraph(acct)) return outlook.sendNew(acct, { to, cc, bcc, subject, body, attachments });
+  const servers = serversFor(acct);
+  const mail = {
+    from: acct.name ? { name: acct.name, address: acct.email } : acct.email,
+    to,
+    cc: cc.length ? cc : undefined,
+    subject,
+    text: body,
+    html: `<div style="white-space:pre-wrap">${esc(body)}</div>`,
+    attachments: attachments.length ? attachments : undefined,
+  };
+  // Bcc goes only in the envelope, never in the message everyone receives.
+  const raw = await new MailComposer(mail).compile().build();
+  const transport = await smtpTransport(acct);
+  try {
+    await transport.sendMail({ envelope: { from: acct.email, to: [...to, ...cc, ...bcc].map((a) => a.address) }, raw });
+  } catch (err) {
+    throw friendly(err);
+  }
+  sentCache.delete(acct.id);
+  if (servers.appendSent) {
+    await withInbox(acct, async (c) => {
+      const sent = await findSpecial(c, '\\Sent');
+      if (sent) await c.append(sent, raw, ['\\Seen']);
+    });
+  }
+}
+
 export async function sendReply(acct, uid, { body, all, attachments = [], box = 'inbox' }) {
   if (viaGraph(acct)) return outlook.sendReply(acct, uid, { body, all, attachments, box });
 

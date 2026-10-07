@@ -36,7 +36,7 @@ body {
 }
 button { font: inherit; color: inherit; cursor: pointer; }
 input, textarea, select { font: inherit; color: var(--ink); }
-.hidden { display: none !important; }
+.hidden, [hidden] { display: none !important; }
 
 /* ---------- login ---------- */
 #login { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; }
@@ -195,6 +195,7 @@ html, body { overscroll-behavior-y: none; }
 .reader-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
 .reader-grid .cal { order: -1; }
 @media (max-width: 959px) { .focus-btn { display: none; } }
+#reader .back.keep { display: grid; }
 #app.focus { grid-template-columns: 1fr; }
 #app.focus .feed-col { display: none; }
 #app.focus .reader-inner { max-width: 1100px; }
@@ -303,6 +304,20 @@ html, body { overflow-x: hidden; }
 .ag-day.today .ag-date { color: var(--accent); }
 .ag-free { color: var(--muted); font-size: 13px; }
 .ag-date + .ev { border-top: 0; }
+/* ---------- compose ---------- */
+.feed-col { position: relative; }
+.fab { position: absolute; right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); z-index: 5;
+  display: inline-flex; align-items: center; gap: 8px; border: 0; border-radius: 16px; padding: 14px 18px;
+  background: var(--accent); color: var(--accent-ink); font-weight: 700; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+.fab svg { width: 20px; height: 20px; }
+#feed { padding-bottom: 88px; }
+.compose .cf { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); padding: 4px 0; }
+.compose .cf > span { flex: none; width: 60px; color: var(--muted); font-size: 14px; }
+.compose .cf input, .compose .cf select { flex: 1; min-width: 0; border: 0; background: none; padding: 10px 0; outline: none; font-size: 15px; }
+.compose .cf select option { background: var(--card); }
+.compose .cc-toggle { border: 0; background: none; color: var(--accent); font-size: 13px; padding: 4px 0; flex: none; }
+.compose textarea { width: 100%; min-height: 260px; border: 0; background: none; padding: 14px 0; resize: vertical; outline: none; font-size: 15px; line-height: 1.5; }
+.compose .c-bottom { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 8px; border-top: 1px solid var(--line); }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
 </style>
@@ -343,6 +358,10 @@ html, body { overflow-x: hidden; }
     <div id="banners"></div>
     <div id="ptr" aria-live="polite"></div>
     <div id="feed"></div>
+    <button class="fab" id="composeBtn" aria-label="New email" title="New email">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+      <span>New email</span>
+    </button>
   </section>
 
   <section id="reader">
@@ -650,6 +669,129 @@ function closeReader(fromHistory = false) {
 function showIdleReader() {
   if (window.innerWidth >= 960 && state.accounts.some((a) => a.calendar)) renderAgenda($('#reader'), { embedded: true });
   else $('#reader').innerHTML = `<div class="reader-placeholder">Pick an email from the feed</div>`;
+}
+
+// ---------- compose a new email ----------
+
+// Addresses seen in the feed, for suggestions while typing recipients.
+function contactSuggestions() {
+  const mine = new Set(state.accounts.map((a) => a.email.toLowerCase()));
+  const seen = new Map();
+  for (const it of state.items) {
+    for (const p of [it.from, ...(it.to || [])]) {
+      if (!p?.address) continue;
+      const k = p.address.toLowerCase();
+      if (mine.has(k) || seen.has(k)) continue;
+      seen.set(k, p.name ? `${p.name.replace(/[<>",]/g, '')} <${p.address}>` : p.address);
+    }
+  }
+  return [...seen.values()];
+}
+
+function defaultFrom() {
+  if (state.filter !== 'all' && state.accounts.some((a) => a.id === state.filter)) return state.filter;
+  let last = null;
+  try { last = localStorage.getItem('fm_from'); } catch {}
+  return state.accounts.some((a) => a.id === last) ? last : state.accounts[0]?.id;
+}
+
+function openCompose() {
+  if (!state.accounts.length) return openSettings();
+  if (window.innerWidth < 960) pushLayer('reader');
+  state.current = { key: 'compose', compose: true };
+  applyFocus();
+  const d = state.draft || (state.draft = { acct: defaultFrom(), to: '', cc: '', bcc: '', subject: '', body: '', files: [], showCc: false });
+  const r = $('#reader');
+  r.classList.add('open');
+  const contacts = contactSuggestions();
+  r.innerHTML = `
+    <div class="reader-top">
+      <button class="icon-btn back keep" aria-label="Close (the draft is kept)" title="Close (the draft is kept)">←</button>
+      <b style="font-size:17px">New email</b><div class="spacer"></div>
+      <button class="btn danger" data-c="discard">Discard</button>
+      <button class="btn" data-c="send">Send</button>
+    </div>
+    <div class="reader-body"><div class="reader-inner compose">
+      <label class="cf"><span>From</span><select name="acct">${state.accounts.map((a) =>
+        `<option value="${a.id}" ${a.id === d.acct ? 'selected' : ''}>${esc(a.name ? `${a.name} (${a.email})` : a.email)}</option>`).join('')}</select></label>
+      <div class="cf"><span>To</span><input name="to" list="dl-to" autocomplete="off" inputmode="email" value="${esc(d.to)}">
+        <button class="cc-toggle" data-c="cc" ${d.showCc ? 'hidden' : ''}>Cc/Bcc</button></div>
+      <label class="cf" ${d.showCc ? '' : 'hidden'} data-ccrow><span>Cc</span><input name="cc" list="dl-cc" autocomplete="off" inputmode="email" value="${esc(d.cc)}"></label>
+      <label class="cf" ${d.showCc ? '' : 'hidden'} data-ccrow><span>Bcc</span><input name="bcc" list="dl-bcc" autocomplete="off" inputmode="email" value="${esc(d.bcc)}"></label>
+      <label class="cf"><span>Subject</span><input name="subject" autocomplete="off" value="${esc(d.subject)}"></label>
+      <textarea name="body" placeholder="Write your email…">${esc(d.body)}</textarea>
+      <div class="files" id="cFiles"></div>
+      <div class="c-bottom">
+        <label class="btn ghost" style="padding:8px 12px">📎 Attach<input type="file" id="cFileInput" multiple hidden></label>
+        <span class="spacer" style="flex:1"></span>
+        <button class="btn" data-c="send">Send</button>
+      </div>
+      <datalist id="dl-to"></datalist><datalist id="dl-cc"></datalist><datalist id="dl-bcc"></datalist>
+    </div></div>`;
+  $('.back', r).onclick = () => closeReader();
+
+  const renderFiles = () => {
+    $('#cFiles').innerHTML = d.files.map((f, i) => `<div class="f"><span>📎 ${esc(f.name)}</span> <small style="color:var(--muted)">${fmtSize(f.size)}</small><button data-rm="${i}" aria-label="Remove">×</button></div>`).join('');
+  };
+  renderFiles();
+  $('#cFileInput').addEventListener('change', (e) => {
+    for (const f of e.target.files) d.files.push(f);
+    e.target.value = '';
+    if (d.files.reduce((n, f) => n + f.size, 0) > 20 * 1024 * 1024) toast('Attachments are over 20 MB in total; most mail servers will refuse them.');
+    renderFiles();
+  });
+  $('#cFiles').addEventListener('click', (e) => {
+    const x = e.target.closest('[data-rm]'); if (!x) return;
+    d.files.splice(Number(x.dataset.rm), 1); renderFiles();
+  });
+
+  // Keep the draft as you type; suggest addresses for the part after the last comma.
+  r.querySelectorAll('input[name], select[name], textarea[name]').forEach((el) => {
+    el.addEventListener('input', () => {
+      d[el.name] = el.value;
+      if (el.name === 'acct') { try { localStorage.setItem('fm_from', el.value); } catch {} }
+      if (['to', 'cc', 'bcc'].includes(el.name)) {
+        const cut = el.value.lastIndexOf(',');
+        const prefix = cut >= 0 ? el.value.slice(0, cut + 1).trimEnd() + ' ' : '';
+        const term = el.value.slice(cut + 1).trim().toLowerCase();
+        const hits = term.length < 2 ? [] : contacts.filter((c) => c.toLowerCase().includes(term)).slice(0, 8);
+        $('#dl-' + el.name).innerHTML = hits.map((c) => `<option value="${esc(prefix + c)}, "></option>`).join('');
+      }
+    });
+    el.addEventListener('change', () => { d[el.name] = el.value; });
+  });
+  if (!d.to) $('input[name="to"]', r).focus();
+
+  r.onclick = async (e) => {
+    const b = e.target.closest('[data-c]'); if (!b) return;
+    if (b.dataset.c === 'cc') {
+      d.showCc = true; b.hidden = true;
+      r.querySelectorAll('[data-ccrow]').forEach((x) => { x.hidden = false; });
+      $('input[name="cc"]', r).focus();
+      return;
+    }
+    if (b.dataset.c === 'discard') {
+      if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Tap again to discard'; return; }
+      state.draft = null;
+      closeReader();
+      return;
+    }
+    if (b.dataset.c === 'send') {
+      if (!(d.to + d.cc + d.bcc).trim()) { toast('Add at least one recipient.'); $('input[name="to"]', r).focus(); return; }
+      const sendBtns = r.querySelectorAll('[data-c="send"]');
+      sendBtns.forEach((x) => { x.disabled = true; x.textContent = 'Sending…'; });
+      try {
+        const attachments = await Promise.all(d.files.map(async (f) => ({ filename: f.name, contentType: f.type, data: await fileToBase64(f) })));
+        await api('/compose', { method: 'POST', body: { acct: d.acct, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body: d.body, attachments } });
+        state.draft = null;
+        toast('Sent ✓');
+        closeReader();
+      } catch (err) {
+        toast(err.message);
+        sendBtns.forEach((x) => { x.disabled = false; x.textContent = 'Send'; });
+      }
+    }
+  };
 }
 
 // ---------- calendar page ----------
@@ -1353,6 +1495,7 @@ async function openSettings() {
 }
 $('#settingsBtn').onclick = openSettings;
 $('#calBtn').onclick = openAgenda;
+$('#composeBtn').onclick = openCompose;
 $('#viewToggle').addEventListener('click', (e) => { const b = e.target.closest('[data-v]'); if (b) setView(b.dataset.v); });
 setView(state.view);
 $('#refreshBtn').onclick = () => loadFeed(true);
@@ -1369,7 +1512,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && st
     try {
       const { v } = await (await fetch('/version', { cache: 'no-store' })).json();
       if (loaded === null) { loaded = v; return; }
-      if (v !== loaded && !state.current && !$('.sheet-back')) location.reload();
+      if (v !== loaded && !state.current && !state.draft && !$('.sheet-back')) location.reload();
     } catch {}
   };
   check();

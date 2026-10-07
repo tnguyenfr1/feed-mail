@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { execFile } from 'node:child_process';
 import express from 'express';
 import compression from 'compression';
+import addressparser from 'nodemailer/lib/addressparser';
 import { loadAccounts, saveAccounts, loadConfig, saveConfig } from './store.js';
 import { PROVIDERS, caldavUrlFor, calendarKind } from './providers.js';
 import * as mail from './mail.js';
@@ -331,18 +332,49 @@ app.delete('/api/msg/:acct/:uid', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Turn "Anna <a@b.com>, c@d.fr" into address objects; refuse anything malformed.
+function parseAddresses(text, label) {
+  const list = addressparser(String(text || '')).flatMap((a) => (a.group ? a.group : [a]));
+  for (const a of list) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.address || '')) {
+      throw Object.assign(new Error(`"${a.address || a.name}" in ${label} isn't a valid email address.`), { status: 400 });
+    }
+  }
+  return list.map((a) => ({ name: a.name || '', address: a.address }));
+}
+
+function readAttachments(body) {
+  const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((a) => ({
+    filename: String(a.filename || 'file'),
+    contentType: String(a.contentType || 'application/octet-stream'),
+    content: Buffer.from(String(a.data || ''), 'base64'),
+  }));
+  if (attachments.reduce((n, a) => n + a.content.length, 0) > MAX_ATTACH) {
+    throw Object.assign(new Error('Attachments are too big (20 MB max in total).'), { status: 413 });
+  }
+  return attachments;
+}
+
+app.post('/api/compose', async (req, res, next) => {
+  try {
+    const acct = findAccount(String(req.body.acct || ''));
+    const to = parseAddresses(req.body.to, 'To');
+    const cc = parseAddresses(req.body.cc, 'Cc');
+    const bcc = parseAddresses(req.body.bcc, 'Bcc');
+    if (!to.length && !cc.length && !bcc.length) return res.status(400).json({ error: 'Add at least one recipient.' });
+    const subject = String(req.body.subject || '').trim();
+    const body = String(req.body.body || '');
+    if (!subject && !body.trim()) return res.status(400).json({ error: 'Write a subject or a message first.' });
+    await mail.sendNew(acct, { to, cc, bcc, subject, body, attachments: readAttachments(req.body) });
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 app.post('/api/msg/:acct/:uid/reply', async (req, res, next) => {
   try {
     const body = String(req.body.body || '').trim();
     if (!body) return res.status(400).json({ error: 'Write something first.' });
-    const attachments = (Array.isArray(req.body.attachments) ? req.body.attachments : []).map((a) => ({
-      filename: String(a.filename || 'file'),
-      contentType: String(a.contentType || 'application/octet-stream'),
-      content: Buffer.from(String(a.data || ''), 'base64'),
-    }));
-    if (attachments.reduce((n, a) => n + a.content.length, 0) > MAX_ATTACH) {
-      return res.status(413).json({ error: 'Attachments are too big (20 MB max in total).' });
-    }
+    const attachments = readAttachments(req.body);
     const box = boxOf(req);
     await mail.sendReply(findAccount(req.params.acct), req.params.uid, { body, all: !!req.body.all, attachments, box });
     if (box === 'inbox') patchCached(req.params.acct, req.params.uid, (it) => { it.answered = true; it.replied = { at: new Date().toISOString(), uid: null }; });

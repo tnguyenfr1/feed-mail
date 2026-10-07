@@ -251,6 +251,32 @@ export async function sendReply(acct, uid, { body, all, attachments = [], box = 
   sentCache.delete(acct.id);
 }
 
+const recipient = (a) => ({ emailAddress: { address: a.address, ...(a.name && { name: a.name }) } });
+
+export async function sendNew(acct, { to, cc = [], bcc = [], subject, body, attachments = [] }) {
+  const total = attachments.reduce((n, a) => n + a.content.length, 0);
+  if (total > MAX_SIMPLE_ATTACH) {
+    throw Object.assign(new Error("Outlook can't send more than 3 MB of attachments in one email yet."), { status: 413 });
+  }
+  await graph(acct, '/me/sendMail', {
+    method: 'POST',
+    body: {
+      saveToSentItems: true,
+      message: {
+        subject,
+        body: { contentType: 'Text', content: body },
+        toRecipients: to.map(recipient),
+        ccRecipients: cc.map(recipient),
+        bccRecipients: bcc.map(recipient),
+        attachments: attachments.map((a) => ({
+          '@odata.type': '#microsoft.graph.fileAttachment', name: a.filename, contentType: a.contentType, contentBytes: a.content.toString('base64'),
+        })),
+      },
+    },
+  });
+  sentCache.delete(acct.id);
+}
+
 // Answer an Outlook meeting request; Outlook tells the organizer and updates the calendar.
 export async function rsvp(acct, uid, partstat) {
   const invite = inviteFrom(await loadEventMessage(acct, uid));
