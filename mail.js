@@ -61,26 +61,96 @@ export function dropClient(acctId) {
 // re-select INBOX when the view may be stale.
 const RESELECT_MS = 15 * 1000;
 
-// Run fn with INBOX selected; retry once on a dead connection.
-async function withInbox(acct, fn, { fresh = false } = {}, retried = false) {
+// Run fn with a mailbox selected; retry once on a dead connection.
+async function withMailbox(acct, path, fn, { fresh = false } = {}, retried = false) {
   const c = await getClient(acct);
   let lock;
   try {
-    lock = await c.getMailboxLock('INBOX');
-    if (fresh || !c.fmSelectedAt || Date.now() - c.fmSelectedAt > RESELECT_MS) {
-      await c.mailboxOpen('INBOX');
+    lock = await c.getMailboxLock(path);
+    // Switching mailbox already re-selects; otherwise refresh a stale view.
+    if (c.fmSelectedPath === path && (fresh || Date.now() - c.fmSelectedAt > RESELECT_MS)) {
+      await c.mailboxOpen(path);
     }
+    c.fmSelectedPath = path;
     c.fmSelectedAt = Date.now();
     return await fn(c);
   } catch (err) {
     if (!retried && !c.usable) {
       clients.delete(acct.id);
-      return withInbox(acct, fn, { fresh }, true);
+      return withMailbox(acct, path, fn, { fresh }, true);
     }
     throw friendly(err);
   } finally {
     lock?.release();
   }
+}
+
+const withInbox = (acct, fn, opts) => withMailbox(acct, 'INBOX', fn, opts);
+
+// ---------- what have I replied to? ----------
+// Scan recent Sent mail and map each original Message-ID to my reply, so
+// replies made anywhere (phone app, webmail) are recognised.
+
+const SENT_SCAN = 300;
+const SENT_STALE_MS = 60 * 1000;
+const sentCache = new Map(); // account id -> { at, map }
+
+async function sentPath(acct) {
+  const c = await getClient(acct);
+  if (c.fmSentPath === undefined) c.fmSentPath = (await findSpecial(c, '\\Sent')) || null;
+  return c.fmSentPath;
+}
+
+async function sentIndex(acct) {
+  const hit = sentCache.get(acct.id);
+  if (hit && Date.now() - hit.at < SENT_STALE_MS) return hit.map;
+  const map = new Map();
+  const path = await sentPath(acct);
+  if (path) {
+    await withMailbox(acct, path, async (c) => {
+      const exists = c.mailbox.exists;
+      if (!exists) return;
+      for await (const m of c.fetch(`${Math.max(1, exists - SENT_SCAN + 1)}:*`, { uid: true, envelope: true, internalDate: true })) {
+        const date = (m.envelope?.date || m.internalDate || new Date()).toISOString();
+        for (const id of (m.envelope?.inReplyTo || '').match(/<[^>]+>/g) || []) {
+          const prev = map.get(id);
+          if (!prev || prev.at < date) map.set(id, { at: date, uid: m.uid });
+        }
+      }
+    });
+  }
+  sentCache.set(acct.id, { at: Date.now(), map });
+  return map;
+}
+
+export async function getSentReply(acct, uid) {
+  const path = await sentPath(acct);
+  if (!path) throw Object.assign(new Error('No Sent folder found.'), { status: 404 });
+  const parsed = await withMailbox(acct, path, async (c) => {
+    const m = await c.fetchOne(String(uid), { source: true }, { uid: true });
+    if (!m) throw Object.assign(new Error('Reply not found in Sent.'), { status: 404 });
+    return simpleParser(m.source);
+  });
+  return {
+    date: (parsed.date || new Date()).toISOString(),
+    to: list(parsed.to),
+    text: stripQuote(parsed.text || ''),
+  };
+}
+
+// Keep only what I wrote, not the quoted original below it.
+function stripQuote(text) {
+  const out = [];
+  const lines = text.split('\n');
+  const intro = /^(On .+wrote:|Le .+a écrit\s*:|-----Original Message-----|-{2,} ?Original)/i;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    // Gmail often wraps "On <date> <name> wrote:" over two lines.
+    if (intro.test(t) || intro.test(`${t} ${(lines[i + 1] || '').trim()}`)) break;
+    if (/^>/.test(t)) continue;
+    out.push(lines[i]);
+  }
+  return out.join('\n').trim();
 }
 
 async function smtpTransport(acct) {
@@ -145,6 +215,9 @@ export async function fetchFeed(acct) {
     return out;
   }, { fresh: true });
 
+  let replies = new Map();
+  try { replies = await sentIndex(acct); } catch {}
+
   const items = [];
   for (const m of raw) {
     let preview = '';
@@ -161,6 +234,8 @@ export async function fetchFeed(acct) {
       to: (env.to || []).map(addr),
       subject: env.subject || '(no subject)',
       seen: m.flags?.has('\\Seen') || false,
+      messageId: env.messageId || null,
+      replied: replies.get(env.messageId) || (m.flags?.has('\\Answered') ? { at: null, uid: null } : null),
       answered: m.flags?.has('\\Answered') || false,
       flagged: m.flags?.has('\\Flagged') || false,
       attach: hasAttachment(m.bodyStructure),
@@ -206,9 +281,14 @@ export async function getMessage(acct, uid) {
   const ics = findIcs(parsed);
   const invite = ics ? parseInvite(ics) : null;
 
+  let replied = null;
+  try { replied = (await sentIndex(acct)).get(parsed.messageId) || null; } catch {}
+
   return {
     acct: acct.id,
     uid: Number(uid),
+    messageId: parsed.messageId || null,
+    replied,
     invite,
     dates: findDates(parsed.subject, parsed.text, parsed.date || new Date()),
     subject: parsed.subject || '(no subject)',
@@ -334,6 +414,8 @@ export async function sendReply(acct, uid, { body, all, attachments = [] }) {
   } catch (err) {
     throw friendly(err);
   }
+
+  sentCache.delete(acct.id); // so the next refresh picks up the new Sent copy
 
   await withInbox(acct, async (c) => {
     await c.messageFlagsAdd(String(uid), ['\\Answered'], { uid: true });

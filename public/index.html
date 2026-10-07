@@ -9,14 +9,14 @@
 <style>
 :root {
   --bg: #f6f7fb; --card: #ffffff; --ink: #161a23; --muted: #6b7280; --line: #e5e7ee;
-  --accent: #3b6cf6; --accent-ink: #ffffff; --danger: #d64545; --unread: #3b6cf6;
+  --accent: #3b6cf6; --accent-ink: #ffffff; --danger: #d64545; --unread: #3b6cf6; --ok: #15803d;
   --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
   --radius: 14px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #111318; --card: #1a1d24; --ink: #e8eaf0; --muted: #9aa1ad; --line: #2a2e38;
-    --accent: #6b8eff; --accent-ink: #0b0d12; --danger: #ff6b6b; --unread: #7c9bff;
+    --accent: #6b8eff; --accent-ink: #0b0d12; --danger: #ff6b6b; --unread: #7c9bff; --ok: #4ade80;
     --shadow: none;
   }
 }
@@ -212,6 +212,14 @@ header.top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.01em; }
   border-radius: 8px; font-size: 13px; background: var(--bg); max-width: 100%; }
 .files .f span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .files .f button { border: 0; background: none; padding: 0 2px; color: var(--muted); font-size: 15px; line-height: 1; }
+.rp { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent); border-radius: 999px; padding: 2px 8px; margin-right: 6px; vertical-align: 1px; }
+.replied-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; color: var(--ok); font-weight: 600;
+  background: color-mix(in srgb, var(--ok) 10%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
+  border-radius: 10px; padding: 8px 12px; margin-bottom: 14px; }
+.replied-bar .btn { padding: 4px 10px; font-size: 13px; }
+.my-reply { flex-basis: 100%; white-space: pre-wrap; word-break: break-word; color: var(--ink); font-weight: 400;
+  border-left: 3px solid var(--ok); padding: 4px 0 4px 10px; margin-top: 4px; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
 </style>
@@ -401,7 +409,7 @@ function renderFeed() {
           <div class="acct">to ${esc(acctLabel(a))}</div></div>
         <div class="when">${esc(fmtWhen(it.date))}</div>
       </div>
-      <div class="subject">${esc(it.subject)}<span class="tags">${it.attach ? '📎' : ''}${it.answered ? '↩︎' : ''}</span></div>
+      <div class="subject">${it.replied ? `<span class="rp">↩ Replied${it.replied.at ? ' · ' + esc(fmtWhen(it.replied.at)) : ''}</span>` : ''}${esc(it.subject)}<span class="tags">${it.attach ? '📎' : ''}</span></div>
       ${it.preview ? `<div class="preview">${esc(it.preview)}</div>` : ''}
     </button>`;
   }
@@ -443,6 +451,15 @@ function closeReader() {
   renderFeed();
 }
 
+function repliedBar(msg) {
+  if (!msg.replied) return '';
+  const when = msg.replied.at
+    ? new Date(msg.replied.at).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+    : '';
+  return `<div class="replied-bar">↩ You replied${when ? ' on ' + esc(when) : ''}
+    ${msg.replied.uid ? `<button class="btn ghost" data-act="myreply">Show my reply</button>` : ''}</div>`;
+}
+
 function frameDoc(html, showImages) {
   const img = showImages ? 'data: cid: https: http:' : 'data: cid:';
   return `<!doctype html><html><head><meta charset="utf-8">
@@ -474,6 +491,7 @@ function renderMessage(msg, showImages) {
           <div class="muted">${esc(new Date(msg.date).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' }))} · in ${esc(acctLabel(a))}</div>
         </div>
       </div>
+      <div id="repliedSlot">${repliedBar(msg)}</div>
       ${hasRemote && !showImages ? `<div class="img-note">Images from the internet are hidden to protect your privacy.<button class="btn ghost" data-act="images">Show images</button></div>` : ''}
       ${msg.html
         ? `<div class="msg-frame-wrap"><iframe class="msg-frame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe></div>`
@@ -524,6 +542,19 @@ function renderMessage(msg, showImages) {
     const b = e.target.closest('[data-act]'); if (!b) return;
     const act = b.dataset.act;
     if (act === 'images') return renderMessage(msg, true);
+    if (act === 'myreply') {
+      const bar = b.closest('.replied-bar');
+      const open = $('.my-reply', bar);
+      if (open) { open.remove(); b.textContent = 'Show my reply'; return; }
+      b.disabled = true;
+      try {
+        const r = await api(`/sent/${msg.acct}/${msg.replied.uid}`);
+        bar.insertAdjacentHTML('beforeend', `<div class="my-reply">${linkify(r.text || '(empty)')}</div>`);
+        b.textContent = 'Hide my reply';
+      } catch (err) { toast(err.message); }
+      b.disabled = false;
+      return;
+    }
     if (act === 'unread') {
       await api(`/msg/${msg.acct}/${msg.uid}/seen`, { method: 'POST', body: { seen: false } }).catch((err) => toast(err.message));
       const it = state.items.find((i) => i.acct === msg.acct && i.uid === msg.uid);
@@ -549,7 +580,9 @@ function renderMessage(msg, showImages) {
         $('#replyText').value = '';
         files.length = 0; renderFiles();
         const it = state.items.find((i) => i.acct === msg.acct && i.uid === msg.uid);
-        if (it) it.answered = true;
+        msg.replied = { at: new Date().toISOString(), uid: null };
+        if (it) { it.answered = true; it.replied = msg.replied; }
+        $('#repliedSlot').innerHTML = repliedBar(msg);
         renderFeed(); toast('Reply sent');
       } catch (err) { toast(err.message); }
       b.disabled = false; b.textContent = 'Send';

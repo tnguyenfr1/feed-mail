@@ -263,6 +263,12 @@ app.get('/api/msg/:acct/:uid/att/:idx', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+app.get('/api/sent/:acct/:uid', async (req, res, next) => {
+  try {
+    res.json(await mail.getSentReply(findAccount(req.params.acct), req.params.uid));
+  } catch (err) { next(err); }
+});
+
 app.post('/api/msg/:acct/:uid/seen', async (req, res, next) => {
   try {
     const seen = !!req.body.seen;
@@ -294,7 +300,7 @@ app.post('/api/msg/:acct/:uid/reply', async (req, res, next) => {
       return res.status(413).json({ error: 'Attachments are too big (20 MB max in total).' });
     }
     await mail.sendReply(findAccount(req.params.acct), req.params.uid, { body, all: !!req.body.all, attachments });
-    patchCached(req.params.acct, req.params.uid, (it) => { it.answered = true; });
+    patchCached(req.params.acct, req.params.uid, (it) => { it.answered = true; it.replied = { at: new Date().toISOString(), uid: null }; });
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
