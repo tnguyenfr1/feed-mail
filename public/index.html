@@ -65,7 +65,9 @@ input, textarea, select { font: inherit; color: var(--ink); }
 .err { color: var(--danger); font-size: 14px; min-height: 20px; margin: 4px 0 8px; }
 
 /* ---------- layout ---------- */
-#app { height: 100%; display: grid; grid-template-columns: 1fr; }
+#app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); }
+.feed-col { min-width: 0; }
+.chips { touch-action: pan-x pan-y; }
 @media (min-width: 960px) { #app { grid-template-columns: minmax(380px, 440px) 1fr; } }
 .feed-col { display: flex; flex-direction: column; min-height: 0; height: 100%; border-right: 1px solid var(--line); }
 
@@ -96,8 +98,9 @@ header.top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.01em; }
   background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
 
 #feed { flex: 1; overflow-y: auto; padding: 0 12px 24px; -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
-#ptr { height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; font-size: 13px;
-  color: var(--muted); transition: height .15s ease-out; flex: none; }
+#ptr { height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px;
+  font-weight: 600; color: var(--accent); transition: height .15s ease-out; flex: none; }
+.ptr-spin { display: inline-block; font-size: 18px; animation: spin 1s linear infinite; }
 html, body { overscroll-behavior-y: none; }
 .day { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
   color: var(--muted); padding: 14px 6px 6px; }
@@ -437,7 +440,8 @@ function renderChips() {
     return `<button class="chip ${state.filter === id ? 'on' : ''}" data-f="${id}">
       ${color ? `<span class="dot" style="background:${color}"></span>` : ''}${esc(label)}${n ? ` <span class="count">${n}</span>` : ''}</button>`;
   };
-  $('#chips').innerHTML = chip('all', 'All') + state.accounts.map((a) => chip(a.id, acctLabel(a), a.color)).join('');
+  // Chips stay short: the account's name, or the part of the address before the @.
+  $('#chips').innerHTML = chip('all', 'All') + state.accounts.map((a) => chip(a.id, a.name || a.email.split('@')[0], a.color)).join('');
   const errs = state.accounts.filter((a) => state.status[a.id]?.error);
   $('#banners').innerHTML = errs.map((a) => `<div class="banner"><b>${esc(acctLabel(a))}:</b> ${esc(state.status[a.id].error)}</div>`).join('');
 }
@@ -556,10 +560,21 @@ function popLayer(name) {
   if (history.state?.fm === name) history.back(); // the popstate handler closes it
   else return true;
 }
+// A "guard" step under the feed: the first back on the feed only warns,
+// a second one within 2 seconds leaves the app.
+let leaveWarnedAt = 0;
+if (history.state?.fm !== 'guard') history.replaceState({ fm: 'root' }, '');
+if (history.state?.fm === 'root') history.pushState({ fm: 'guard' }, '');
 window.addEventListener('popstate', () => {
   const sheet = $('.sheet-back');
   if (sheet && history.state?.fm !== 'sheet') { sheet._close?.(true); return; }
-  if (state.current && history.state?.fm !== 'reader') closeReader(true);
+  if (state.current && history.state?.fm !== 'reader') { closeReader(true); return; }
+  if (history.state?.fm === 'root') {
+    if (Date.now() - leaveWarnedAt < 2000) { history.back(); return; }
+    leaveWarnedAt = Date.now();
+    toast('Swipe back again to close Feed Mail');
+    history.pushState({ fm: 'guard' }, '');
+  }
 });
 
 async function openConversation(g) {
@@ -674,9 +689,10 @@ function messageHtml(conv, m, idx) {
         `<a class="att" href="/api${msgUrl(f, '/att/' + x.idx)}">📎 ${esc(x.filename)} <span style="color:var(--muted)">${fmtSize(x.size)}</span></a>`).join('')}</div>` : ''}`;
   }
   const many = recipientsOf(m).length > 1;
+  const single = conv.msgs.length === 1; // the bottom bar is enough then
   const actions = m.full && !m.full.error ? `<div class="tm-actions">
-      <button class="btn ghost" data-act="replyto" data-idx="${idx}">↩ Reply</button>
-      ${many ? `<button class="btn ghost" data-act="replyall" data-idx="${idx}">↩ Reply all</button>` : ''}
+      ${single ? '' : `<button class="btn ghost" data-act="replyto" data-idx="${idx}">↩ Reply to this</button>`}
+      ${single || !many ? '' : `<button class="btn ghost" data-act="replyall" data-idx="${idx}">↩ Reply all to this</button>`}
       ${m.meta.box === 'inbox' && m.meta.uid ? `<span class="spacer"></span><button class="btn danger" data-act="delete" data-idx="${idx}">Delete</button>` : ''}
     </div>` : '';
   return `<div class="tmsg open ${isMe(conv, m) ? 'mine' : ''} ${isTarget ? 'target' : ''}" data-idx="${idx}">${head}<div class="tm-body">${body}</div>${actions}</div>`;
@@ -775,7 +791,10 @@ function updateComposerTarget(conv) {
     : '';
   const to = isMe(conv, m) ? (m.full?.to || m.meta.to || []) : [m.full?.from || m.meta.from].filter(Boolean);
   $('#replyTo').textContent = `To ${to.map(fmtAddr).join(', ')}`;
-  $('#replyStub').textContent = `↩ Reply to ${isMe(conv, m) ? (m.meta.to || []).map(shortName).join(', ') : shortName(m.meta.from)}…`;
+  const whoTo = isMe(conv, m) ? (m.meta.to || []).map(shortName).join(', ') : shortName(m.meta.from);
+  $('#replyStub').textContent = conv.msgs.length > 1
+    ? `↩ Reply to ${whoTo} · ${m === last ? 'latest' : fmtLong(m.meta.date)}…`
+    : `↩ Reply to ${whoTo}…`;
   $('#replyAllWrap').style.display = recipientsOf(m).length > 1 ? 'flex' : 'none';
 }
 
@@ -960,8 +979,14 @@ function fileToBase64(file) {
     if (y0 === null) return;
     y0 = null;
     if (dy * 0.5 >= PULL * 0.5 + 10) {
-      show(44, 'Refreshing…');
+      const before = new Set(state.items.map((i) => i.id));
+      ptr.innerHTML = '<span class="ptr-spin">↻</span> Checking all inboxes…';
+      ptr.style.height = '48px';
+      while (state.loading) await new Promise((r) => setTimeout(r, 200));
       await loadFeed(true);
+      const fresh = state.items.filter((i) => !before.has(i.id)).length;
+      show(48, fresh ? `✓ ${fresh} new` : '✓ Updated');
+      await new Promise((r) => setTimeout(r, 1200));
     }
     show(0, '');
   });
