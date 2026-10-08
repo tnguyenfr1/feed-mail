@@ -200,7 +200,7 @@ html, body { overscroll-behavior-y: none; }
 #app.focus { grid-template-columns: 1fr; }
 #app.focus .feed-col { display: none; }
 #app.focus .reader-inner { max-width: 1100px; }
-.cal .cal-body { max-height: 320px; overflow-y: auto; }
+.cal .cal-body { overflow: visible; }
 .cal { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
 .cal > summary { list-style: none; cursor: pointer; padding: 12px 14px; display: flex; align-items: center; gap: 8px; font-weight: 600; }
 .cal > summary::-webkit-details-marker { display: none; }
@@ -1080,7 +1080,13 @@ function renderConversation(conv) {
   renderThread(conv);
   setupComposer(conv);
   for (const m of conv.msgs) if (m.open && !m.full) loadFull(conv, m);
+  // The calendar strip follows the newest message from someone else, even when
+  // it's folded (e.g. when my own reply is the latest): load it for the strip.
+  const theirs = newestTheirs(conv);
+  if (theirs && !theirs.full) loadFull(conv, theirs);
 }
+
+const newestTheirs = (conv) => [...conv.msgs].reverse().find((x) => x.meta.uid && x.meta.box !== 'sent' && !x.meta.mine);
 
 function renderThread(conv) {
   const t = $('#thread');
@@ -1127,8 +1133,8 @@ async function loadFull(conv, m) {
   if (state.current !== conv) return;
   renderThread(conv);
   // The calendar follows the newest message from someone else.
-  const newestInbox = [...conv.msgs].reverse().find((x) => x.meta.box === 'inbox' && x.full && !x.full.error);
-  if (newestInbox && !conv.calSet && $('#calPanel')) { conv.calSet = true; setupCalendar(newestInbox.full); }
+  const theirs = newestTheirs(conv);
+  if (theirs?.full && !theirs.full.error && !conv.calSet && $('#calPanel')) { conv.calSet = true; setupCalendar(theirs.full); }
 }
 
 function updateComposerTarget(conv) {
@@ -1477,7 +1483,10 @@ function renderCal(panel, data) {
       ${notes}
     </div>`;
   const form = $('.ev-form', panel);
-  if (form) wireEventForm(form, (saved) => { cs.adding = null; if (saved) loadCalDay(panel); else renderCal(panel, data); });
+  if (form) {
+    wireEventForm(form, (saved) => { cs.adding = null; if (saved) loadCalDay(panel); else renderCal(panel, data); });
+    if (cs.adding === true) { cs.adding = 'shown'; form.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+  }
 }
 
 async function sendRsvp(panel, response) {
