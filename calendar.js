@@ -4,8 +4,8 @@ import { createDAVClient } from 'tsdav';
 import ICAL from 'ical.js';
 import * as chrono from 'chrono-node';
 import { caldavUrlFor, calendarKind } from './providers.js';
-import { googleEvents, googleCalendars, googleRsvp, googleImport } from './google.js';
-import { outlookEvents } from './microsoft.js';
+import { googleEvents, googleCalendars, googleRsvp, googleImport, googleCreate, googleDelete } from './google.js';
+import { outlookEvents, outlookCreate, outlookDelete } from './microsoft.js';
 
 const CAL_LIST_MS = 30 * 60 * 1000;
 const EVENTS_MS = 5 * 60 * 1000;
@@ -96,6 +96,7 @@ function eventsFromIcs(ics, from, to) {
       if (en > from && s < to) {
         out.push({
           uid: ev.uid,
+          recurring: ev.isRecurring(), // on CalDAV, removing deletes the whole series
           title: item.summary || '(no title)',
           location: item.location || '',
           allDay: start.isDate,
@@ -138,9 +139,10 @@ async function loadEvents(acct, from, to) {
   const timeRange = { start: new Date(from - 864e5).toISOString(), end: new Date(+to + 864e5).toISOString() };
   for (const cal of calendars) {
     const objects = await client.fetchCalendarObjects({ calendar: cal, timeRange });
+    const readOnly = /birthday|anniversaire|geburtstag|holiday|férié/i.test(cal.displayName || '');
     for (const o of objects) {
       for (const ev of eventsFromIcs(o.data || '', from, to)) {
-        events.push({ ...ev, acct: acct.id, calendar: cal.displayName || 'Calendar' });
+        events.push({ ...ev, acct: acct.id, calendar: cal.displayName || 'Calendar', ref: o.url, etag: o.etag, readOnly });
       }
     }
   }
@@ -301,6 +303,54 @@ export async function addToCalendar(acct, ics, partstat) {
   return cal.displayName || 'Calendar';
 }
 
+// ---------- add / remove events by hand ----------
+
+// ev: { title, allDay, date, endDate (exclusive, all-day), start, end (ISO, timed), location, notes }
+export async function createEvent(acct, ev) {
+  const kind = calendarKind(acct);
+  let name;
+  if (kind === 'google') name = await googleCreate(acct, ev);
+  else if (kind === 'microsoft') name = await outlookCreate(acct, ev);
+  else {
+    const { client, calendars } = await getCal(acct);
+    const cal = calendars.find((c) => !/birthday|anniversaire|geburtstag|holiday|férié/i.test(c.displayName || '')) || calendars[0];
+    if (!cal) throw new Error('No calendar found in this account.');
+    const root = new ICAL.Component(['vcalendar', [], []]);
+    root.addPropertyWithValue('prodid', '-//Feed Mail//EN');
+    root.addPropertyWithValue('version', '2.0');
+    const v = new ICAL.Component('vevent');
+    // No "@" in the id: Yahoo stores events under their UID and some URL handling double-encodes it.
+    const uid = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-feedmail`;
+    v.addPropertyWithValue('uid', uid);
+    v.addPropertyWithValue('dtstamp', ICAL.Time.fromJSDate(new Date(), true));
+    v.addPropertyWithValue('dtstart', ev.allDay ? ICAL.Time.fromDateString(ev.date) : ICAL.Time.fromJSDate(new Date(ev.start), true));
+    v.addPropertyWithValue('dtend', ev.allDay ? ICAL.Time.fromDateString(ev.endDate) : ICAL.Time.fromJSDate(new Date(ev.end), true));
+    v.addPropertyWithValue('summary', ev.title);
+    if (ev.location) v.addPropertyWithValue('location', ev.location);
+    if (ev.notes) v.addPropertyWithValue('description', ev.notes);
+    root.addSubcomponent(v);
+    const res = await client.createCalendarObject({ calendar: cal, filename: uid.replace(/[^\w.-]/g, '_') + '.ics', iCalString: root.toString() });
+    if (!res.ok) throw new Error(`Calendar refused the event (${res.status}).`);
+    name = cal.displayName || 'Calendar';
+  }
+  forgetCalendar(acct.id);
+  return name;
+}
+
+export async function deleteEvent(acct, { ref, etag }) {
+  const kind = calendarKind(acct);
+  if (kind === 'google') await googleDelete(acct, ref);
+  else if (kind === 'microsoft') await outlookDelete(acct, ref);
+  else {
+    const { client } = await getCal(acct);
+    // Undo double-encoding (%2540 → %40) that breaks deletes on Yahoo/AOL.
+    const url = ref.replace(/%25([0-9A-Fa-f]{2})/g, '%$1');
+    const res = await client.deleteCalendarObject({ calendarObject: { url, etag } });
+    if (!res.ok && res.status !== 404) throw new Error(`Calendar refused to remove it (${res.status}).`);
+  }
+  forgetCalendar(acct.id);
+}
+
 // ---------- dates mentioned in an email ----------
 
 function stripQuoted(text) {
@@ -327,7 +377,14 @@ export function findDates(subject, text, sentAt) {
     // A bare time ("at 3pm") with no day is too vague to be useful.
     if (!r.start.isCertain('day') && !r.start.isCertain('weekday')) continue;
     const key = ymd(d);
-    if (!seen.has(key)) seen.set(key, { date: key, text: r.text.slice(0, 40) });
+    const timed = r.start.isCertain('hour');
+    const entry = {
+      date: key,
+      text: r.text.slice(0, 40),
+      ...(timed && { start: d.toISOString(), end: (r.end?.date() || new Date(+d + 3600e3)).toISOString() }),
+    };
+    // Prefer a mention with a time over a bare date for the same day.
+    if (!seen.has(key) || (timed && !seen.get(key).start)) seen.set(key, entry);
   }
   return [...seen.values()].sort((a, b) => (a.date < b.date ? -1 : 1)).slice(0, 4);
 }

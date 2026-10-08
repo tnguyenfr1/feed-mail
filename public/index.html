@@ -326,6 +326,22 @@ html, body { overflow-x: hidden; }
 .search-head { color: var(--muted); font-size: 13px; padding: 6px 6px 2px; }
 .card .boxtag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px; margin-left: 6px; }
 @media (max-width: 420px) { header.top .icon-btn { width: 36px; height: 36px; } header.top { gap: 5px; } }
+/* ---------- add / remove events ---------- */
+.ev.tappable { cursor: pointer; }
+.ev-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 0 10px 14px; font-size: 13px; }
+.ev-actions .btn { padding: 6px 12px; font-size: 13px; }
+.ev-actions .muted { color: var(--muted); }
+.add-ev { margin-top: 8px; padding: 7px 12px; font-size: 13px; }
+.ev-form { display: grid; gap: 8px; margin-top: 10px; padding: 12px; border: 1px solid var(--accent); border-radius: 10px; background: var(--bg); }
+.ev-form .lbl { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
+.ev-form input:not([type=checkbox]), .ev-form select { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); font-size: 14px; }
+.ev-form .ev-when { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ev-form .ev-when > input { flex: 1 1 150px; }
+.ev-form .ev-times { display: flex; align-items: center; gap: 6px; flex: 1 1 200px; }
+.ev-form .ev-times input { flex: 1; min-width: 0; }
+.ev-form .ev-check, .ev-form .ev-cal { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
+.ev-form .ev-cal select { flex: 1; }
+.ev-form .ev-btns { display: flex; gap: 8px; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
 </style>
@@ -920,26 +936,34 @@ async function renderAgenda(root, { embedded, start } = {}) {
   } catch (err) { data = { events: [], status: {}, error: err.message }; }
   if (root._agenda !== token) return; // the user moved on meanwhile
 
-  const when = (ev) => ev.allDay ? 'All day' : `${hm(new Date(ev.start))}–${hm(new Date(ev.end))}`;
   let html = '';
+  const all = []; // the rows index into this
   for (let d = from; d < to; d = addDays(d, 1)) {
     const evs = data.events.filter((ev) => onDay(ev, d))
       .sort((a, b) => (a.allDay === b.allDay ? (a.start < b.start ? -1 : 1) : a.allDay ? -1 : 1));
     const label = parseYmd(d).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' });
     html += `<div class="ag-day ${d === today ? 'today' : ''} ${evs.length ? '' : 'free'}">
       <div class="ag-date">${d === today ? 'Today · ' : d === addDays(today, 1) ? 'Tomorrow · ' : ''}${esc(label)}</div>
-      ${evs.length ? evs.map((ev) => {
-        const a = acctOf(ev.acct);
-        return `<div class="ev" style="--acct:${a.color}"><span class="bar"></span><span class="t">${esc(when(ev))}</span>
-          <span class="what"><div>${esc(ev.title)}</div><div>${esc([ev.location, /^(calendar|my calendar|calendrier)$/i.test(ev.calendar || '') || ev.calendar === a.email ? '' : ev.calendar, acctLabel(a)].filter(Boolean).join(' · '))}</div></span></div>`;
-      }).join('') : '<div class="ag-free">Nothing scheduled</div>'}
+      ${evs.length ? evs.map((ev) => { all.push(ev); return eventRow(ev, all.length - 1); }).join('') : '<div class="ag-free">Nothing scheduled</div>'}
     </div>`;
   }
   const notes = Object.entries(data.status || {}).filter(([, v]) => v.error)
     .map(([id, v]) => `<div class="cal-note bad">${esc(acctLabel(acctOf(id)))}: ${esc(v.error)}</div>`).join('')
     + (data.error ? `<div class="cal-note bad">${esc(data.error)}</div>` : '');
-  root.innerHTML = `${top}<div class="reader-body"><div class="reader-inner">${notes}${html}</div></div>`;
+  root.innerHTML = `${top}<div class="reader-body"><div class="reader-inner">
+    ${calAccounts().length ? `<div id="agAdd"><button class="btn ghost add-ev" data-agadd>＋ New event</button></div>` : ''}${notes}${html}</div></div>`;
   wire();
+  const reload = () => renderAgenda(root, { embedded, start: from });
+  $('.reader-body', root).addEventListener('click', async (e) => {
+    if (e.target.closest('.ev-form')) return;
+    if (e.target.closest('[data-agadd]')) {
+      $('#agAdd', root).innerHTML = eventFormHtml({ date: from === today ? today : from });
+      wireEventForm($('.ev-form', root), (saved) => (saved ? reload() : ($('#agAdd', root).innerHTML = '<button class="btn ghost add-ev" data-agadd>＋ New event</button>')));
+      $('.ev-form input[name=title]', root).focus();
+      return;
+    }
+    await handleEventTap(e, root, all, reload);
+  });
 }
 
 function repliedBar(m) {
@@ -1357,8 +1381,19 @@ function setupCalendar(msg) {
   state.calKeep = panel;
   panel._cs = cs;
   panel.addEventListener('click', async (e) => {
+    if (e.target.closest('.ev-form')) return;
+    if (e.target.closest('[data-addev]')) { e.preventDefault(); cs.adding = true; return renderCal(panel, panel._data); }
+    if (e.target.closest('[data-addinvite]')) {
+      e.preventDefault();
+      try {
+        const r = await api(`/msg/${cs.msg.acct}/${encodeURIComponent(cs.msg.uid)}/addinvite`, { method: 'POST' });
+        cs.rsvp = { text: `Added to ${r.savedTo} ✓` };
+      } catch (err) { cs.rsvp = { text: err.message, bad: true }; }
+      return loadCalDay(panel);
+    }
+    if (await handleEventTap(e, panel, panel._events || [], () => loadCalDay(panel))) { e.preventDefault(); return; }
     const t = e.target.closest('[data-day]');
-    if (t) { e.preventDefault(); cs.day = t.dataset.day; return loadCalDay(panel); }
+    if (t) { e.preventDefault(); cs.day = t.dataset.day; cs.adding = null; return loadCalDay(panel); }
     const r = e.target.closest('[data-rsvp]');
     if (r) { e.preventDefault(); return sendRsvp(panel, r.dataset.rsvp); }
   });
@@ -1381,6 +1416,7 @@ async function loadCalDay(panel) {
 
 function renderCal(panel, data) {
   const cs = panel._cs;
+  if (data) panel._data = data;
   const { inv, day } = cs;
   const events = data ? data.events.filter((ev) => onDay(ev, day)) : [];
   const invHere = inv && onDay(inv, day);
@@ -1403,18 +1439,27 @@ function renderCal(panel, data) {
       ${inv.organizer ? `<div class="muted">from ${esc(inv.organizer.name || inv.organizer.address)}</div>` : ''}
       ${inv.method === 'REQUEST' ? (cs.rsvp
         ? `<div class="cal-note ${cs.rsvp.bad ? 'bad' : ''}">${esc(cs.rsvp.text)}</div>`
-        : `<div class="rsvp"><button class="btn" data-rsvp="ACCEPTED">Accept</button><button class="btn ghost" data-rsvp="TENTATIVE">Maybe</button><button class="btn danger" data-rsvp="DECLINED">Decline</button></div>`) : ''}
+        : `<div class="rsvp"><button class="btn" data-rsvp="ACCEPTED">Accept</button><button class="btn ghost" data-rsvp="TENTATIVE">Maybe</button><button class="btn danger" data-rsvp="DECLINED">Decline</button></div>`)
+        : inv.method !== 'CANCEL' && !already ? (cs.rsvp
+          ? `<div class="cal-note ${cs.rsvp.bad ? 'bad' : ''}">${esc(cs.rsvp.text)}</div>`
+          : `<div class="rsvp"><button class="btn" data-addinvite>Add to calendar</button></div>`) : ''}
     </div>` : '';
 
+  panel._events = shown;
   const evHtml = !data ? `<div class="ev free">Loading your calendars…</div>`
-    : shown.length ? shown.map((ev) => {
-        const a = acctOf(ev.acct);
-        const clash = clashes.includes(ev);
-        return `<div class="ev ${clash ? 'clash' : ''}" style="--acct:${a.color}"><span class="bar"></span>
-          <span class="t">${esc(when(ev))}</span>
-          <span class="what"><div>${esc(ev.title)}</div><div>${esc([ev.location, acctLabel(a)].filter(Boolean).join(' · '))}</div></span></div>`;
-      }).join('')
+    : shown.length ? shown.map((ev, i) => eventRow(ev, i, { clash: clashes.includes(ev) })).join('')
     : `<div class="ev free">Nothing scheduled${invHere ? ' — you are free' : ''}.</div>`;
+
+  // Add an event for this day, pre-filled from the email (and its time, if it gives one).
+  const mention = (cs.msg.dates || []).find((d) => d.date === day);
+  const addHtml = !calAccounts().length || cs.adding === false ? '' : cs.adding
+    ? eventFormHtml({
+        title: cleanSubject(cs.msg.subject), date: day,
+        from: mention?.start ? timeOf(mention.start) : '', to: mention?.end ? timeOf(mention.end) : '',
+        acct: cs.msg.acct,
+        notes: `From the email “${cleanSubject(cs.msg.subject)}”${cs.msg.from ? ' — ' + (cs.msg.from.name || cs.msg.from.address) : ''}`,
+      })
+    : `<button class="btn ghost add-ev" data-addev>＋ Add to calendar${mention?.start ? ` · ${timeOf(mention.start)}–${timeOf(mention.end)}` : ''}</button>`;
 
   const notes = data ? Object.entries(data.status || {}).filter(([, v]) => v.error)
     .map(([id, v]) => `<div class="cal-note bad">${esc(acctLabel(acctOf(id)))}: ${esc(v.error)}</div>`).join('')
@@ -1428,8 +1473,11 @@ function renderCal(panel, data) {
         <button data-day="${addDays(day, 1)}" aria-label="Next day">›</button></div>
       ${inviteHtml}
       <div>${evHtml}</div>
+      ${addHtml}
       ${notes}
     </div>`;
+  const form = $('.ev-form', panel);
+  if (form) wireEventForm(form, (saved) => { cs.adding = null; if (saved) loadCalDay(panel); else renderCal(panel, data); });
 }
 
 async function sendRsvp(panel, response) {
@@ -1445,6 +1493,95 @@ async function sendRsvp(panel, response) {
     toast(err.message);
   }
   loadCalDay(panel);
+}
+
+// ---------- add / remove calendar events ----------
+
+const calAccounts = () => state.accounts.filter((a) => a.calendar);
+const timeOf = (iso) => { const d = new Date(iso); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+const cleanSubject = (s) => String(s || '').replace(/^\s*((re|tr|fw|fwd|aw|wg)\s*:\s*)+/i, '').trim();
+
+// One event row; tapping it shows a Remove button (except read-only calendars).
+function eventRow(ev, idx, { clash = false } = {}) {
+  const a = acctOf(ev.acct);
+  const when = ev.allDay ? 'All day' : `${hm(new Date(ev.start))}–${hm(new Date(ev.end))}`;
+  const cal = /^(calendar|my calendar|calendrier)$/i.test(ev.calendar || '') || ev.calendar === a.email ? '' : ev.calendar;
+  return `<div class="ev ${clash ? 'clash' : ''} tappable" style="--acct:${a.color}" data-ev="${idx}"><span class="bar"></span>
+    <span class="t">${esc(when)}</span>
+    <span class="what"><div>${esc(ev.title)}</div><div>${esc([ev.location, cal, acctLabel(a)].filter(Boolean).join(' · '))}</div></span></div>`;
+}
+
+// Handles taps on event rows inside `root`; `events` is the list the rows index into.
+async function handleEventTap(e, root, events, reload) {
+  const rm = e.target.closest('[data-rmev]');
+  if (rm) {
+    const ev = events[Number(rm.dataset.rmev)];
+    if (rm.dataset.confirm !== '1') { rm.dataset.confirm = '1'; rm.textContent = 'Tap again to remove'; return true; }
+    rm.disabled = true;
+    try {
+      await api('/events', { method: 'DELETE', body: { acct: ev.acct, ref: ev.ref, etag: ev.etag } });
+      toast('Removed from calendar');
+      reload();
+    } catch (err) { toast(err.message); rm.disabled = false; }
+    return true;
+  }
+  const row = e.target.closest('[data-ev]');
+  if (!row) return false;
+  const next = row.nextElementSibling;
+  if (next?.classList.contains('ev-actions')) { next.remove(); return true; }
+  root.querySelectorAll('.ev-actions').forEach((x) => x.remove());
+  const ev = events[Number(row.dataset.ev)];
+  const a = acctOf(ev.acct);
+  row.insertAdjacentHTML('afterend', `<div class="ev-actions">
+    ${ev.readOnly || !ev.ref
+      ? `<span class="muted">This calendar can't be changed from here.</span>`
+      : `<button class="btn danger" data-rmev="${row.dataset.ev}">Remove from calendar</button>
+         <span class="muted">${esc(acctLabel(a))}${ev.recurring && a.provider !== 'gmail' && a.provider !== 'outlook' ? ' · removes every repeat' : ev.recurring ? ' · only this one' : ''}</span>`}
+  </div>`);
+  return true;
+}
+
+// The add-event form. prefill: { title, date, start, end, allDay, location, notes, acct }
+function eventFormHtml(p) {
+  const cals = calAccounts();
+  const acct = cals.some((a) => a.id === p.acct) ? p.acct : cals[0]?.id;
+  return `<form class="ev-form">
+    <div class="lbl">New event</div>
+    <input name="title" placeholder="Title" value="${esc(p.title || '')}" required>
+    <label class="ev-check"><input type="checkbox" name="allDay" ${p.allDay ? 'checked' : ''}> All day</label>
+    <div class="ev-when">
+      <input type="date" name="date" value="${esc(p.date)}" required>
+      <span class="ev-times" ${p.allDay ? 'hidden' : ''}><input type="time" name="from" value="${esc(p.from || '09:00')}"> – <input type="time" name="to" value="${esc(p.to || '10:00')}"></span>
+    </div>
+    <input name="location" placeholder="Place (optional)" value="${esc(p.location || '')}">
+    <label class="ev-cal">Calendar <select name="acct">${cals.map((a) => `<option value="${a.id}" ${a.id === acct ? 'selected' : ''}>${esc(acctLabel(a))}</option>`).join('')}</select></label>
+    <input type="hidden" name="notes" value="${esc(p.notes || '')}">
+    <div class="ev-btns"><button class="btn" type="submit">Add to calendar</button><button class="btn ghost" type="button" data-evcancel>Cancel</button></div>
+  </form>`;
+}
+
+function wireEventForm(form, onDone) {
+  form.allDay.addEventListener('change', () => { $('.ev-times', form).hidden = form.allDay.checked; });
+  $('[data-evcancel]', form).addEventListener('click', () => onDone(false));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = form;
+    const body = { acct: f.acct.value, title: f.title.value.trim(), allDay: f.allDay.checked, location: f.location.value.trim(), notes: f.notes.value };
+    if (body.allDay) { body.date = f.date.value; body.endDate = addDays(f.date.value, 1); }
+    else {
+      const [y, m, d] = f.date.value.split('-').map(Number);
+      const at = (t) => { const [h, mi] = t.split(':').map(Number); return new Date(y, m - 1, d, h, mi).toISOString(); };
+      body.start = at(f.from.value || '09:00');
+      body.end = at(f.to.value || '10:00');
+      if (body.end <= body.start) { toast('The end must be after the start.'); return; }
+    }
+    const btn = $('[type="submit"]', f); btn.disabled = true; btn.textContent = 'Adding…';
+    try {
+      const r = await api('/events', { method: 'POST', body });
+      toast(`Added to ${r.calendar} ✓`);
+      onDone(true);
+    } catch (err) { toast(err.message); btn.disabled = false; btn.textContent = 'Add to calendar'; }
+  });
 }
 
 // ---------- settings ----------

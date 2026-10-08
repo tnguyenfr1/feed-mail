@@ -120,6 +120,9 @@ export async function googleEvents(acct, from, to) {
         if (me?.responseStatus === 'declined') continue;
         out.push({
           uid: e.iCalUID || e.id,
+          ref: `${cal.id}|${e.id}`, // what's needed to remove it
+          recurring: !!e.recurringEventId,
+          readOnly: !['owner', 'writer'].includes(cal.accessRole),
           title: e.summary || '(no title)',
           location: e.location || '',
           allDay: !!e.start.date,
@@ -171,4 +174,27 @@ export async function googleImport(acct, invite, rrules, partstat) {
     },
   });
   return 'Google Calendar';
+}
+
+// ---------- add / remove events ----------
+
+export async function googleCreate(acct, ev) {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const when = (iso, date) => (ev.allDay ? { date } : { dateTime: iso, timeZone: tz });
+  await gapi(acct, '/calendars/primary/events', {
+    method: 'POST',
+    body: {
+      summary: ev.title,
+      location: ev.location || undefined,
+      description: ev.notes || undefined,
+      start: when(ev.start, ev.date),
+      end: when(ev.end, ev.endDate),
+    },
+  });
+  return 'Google Calendar';
+}
+
+export async function googleDelete(acct, ref) {
+  const [calId, eventId] = ref.split('|');
+  await gapi(acct, `/calendars/${encodeURIComponent(calId)}/events/${encodeURIComponent(eventId)}`, { method: 'DELETE' });
 }

@@ -444,6 +444,46 @@ app.get('/api/calendar', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Add an event by hand (e.g. from a date mentioned in an email) or remove one.
+app.post('/api/events', async (req, res, next) => {
+  try {
+    const acct = findAccount(String(req.body.acct || ''));
+    if (!calendarKind(acct)) return res.status(400).json({ error: 'This account has no calendar.' });
+    const b = req.body;
+    const title = String(b.title || '').trim().slice(0, 300);
+    if (!title) return res.status(400).json({ error: 'Give the event a title.' });
+    const ymdOk = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ''));
+    const ev = { title, allDay: !!b.allDay, location: String(b.location || '').slice(0, 300), notes: String(b.notes || '').slice(0, 2000) };
+    if (ev.allDay) {
+      if (!ymdOk(b.date) || !ymdOk(b.endDate) || b.endDate <= b.date) return res.status(400).json({ error: 'Check the dates.' });
+      Object.assign(ev, { date: b.date, endDate: b.endDate });
+    } else {
+      const s0 = new Date(b.start), e0 = new Date(b.end);
+      if (isNaN(s0) || isNaN(e0) || e0 <= s0) return res.status(400).json({ error: 'The end must be after the start.' });
+      Object.assign(ev, { start: s0.toISOString(), end: e0.toISOString() });
+    }
+    res.json({ ok: true, calendar: await cal.createEvent(acct, ev) });
+  } catch (err) { next(err); }
+});
+
+app.delete('/api/events', async (req, res, next) => {
+  try {
+    const acct = findAccount(String(req.body.acct || ''));
+    if (!req.body.ref) return res.status(400).json({ error: 'Missing event' });
+    await cal.deleteEvent(acct, { ref: String(req.body.ref), etag: req.body.etag ? String(req.body.etag) : undefined });
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// An invitation that only informs (no RSVP): just put it in the calendar.
+app.post('/api/msg/:acct/:uid/addinvite', async (req, res, next) => {
+  try {
+    const acct = findAccount(req.params.acct);
+    const { ics } = await mail.getInviteIcs(acct, req.params.uid);
+    res.json({ ok: true, savedTo: await cal.addToCalendar(acct, ics, 'ACCEPTED') });
+  } catch (err) { next(err); }
+});
+
 const RSVP = { ACCEPTED: 'Accepted', TENTATIVE: 'Tentative', DECLINED: 'Declined' };
 
 app.post('/api/msg/:acct/:uid/rsvp', async (req, res, next) => {

@@ -116,12 +116,12 @@ export const utc = (dt) => (dt ? new Date(dt.endsWith('Z') ? dt : dt + 'Z').toIS
 // ---------- calendar ----------
 
 export async function outlookEvents(acct, from, to) {
-  const cals = await graph(acct, '/me/calendars', { query: { $select: 'id,name', $top: '50' } });
+  const cals = await graph(acct, '/me/calendars', { query: { $select: 'id,name,canEdit', $top: '50' } });
   const out = [];
   for (const cal of cals.value || []) {
     let next = `${GRAPH}/me/calendars/${encodeURIComponent(cal.id)}/calendarView?` + new URLSearchParams({
       startDateTime: from.toISOString(), endDateTime: to.toISOString(), $top: '250',
-      $select: 'subject,start,end,isAllDay,location,iCalUId,isCancelled,responseStatus',
+      $select: 'id,type,subject,start,end,isAllDay,location,iCalUId,isCancelled,responseStatus',
     });
     while (next) {
       const r = await graph(acct, next);
@@ -129,6 +129,9 @@ export async function outlookEvents(acct, from, to) {
         if (e.isCancelled || e.responseStatus?.response === 'declined') continue;
         out.push({
           uid: e.iCalUId,
+          ref: e.id, // what's needed to remove it
+          recurring: e.type === 'occurrence' || e.type === 'exception',
+          readOnly: cal.canEdit === false,
           title: e.subject || '(no title)',
           location: e.location?.displayName || '',
           allDay: !!e.isAllDay,
@@ -145,4 +148,28 @@ export async function outlookEvents(acct, from, to) {
 
 export async function testOutlookCalendar(acct) {
   return ((await graph(acct, '/me/calendars', { query: { $select: 'id' } })).value || []).length;
+}
+
+// ---------- add / remove events ----------
+
+export async function outlookCreate(acct, ev) {
+  const at = (iso, date) => (ev.allDay
+    ? { dateTime: `${date}T00:00:00`, timeZone: 'UTC' }
+    : { dateTime: new Date(iso).toISOString().replace('Z', ''), timeZone: 'UTC' });
+  await graph(acct, '/me/events', {
+    method: 'POST',
+    body: {
+      subject: ev.title,
+      isAllDay: !!ev.allDay,
+      start: at(ev.start, ev.date),
+      end: at(ev.end, ev.endDate),
+      ...(ev.location && { location: { displayName: ev.location } }),
+      ...(ev.notes && { body: { contentType: 'Text', content: ev.notes } }),
+    },
+  });
+  return 'Outlook Calendar';
+}
+
+export async function outlookDelete(acct, ref) {
+  await graph(acct, `/me/events/${encodeURIComponent(ref)}`, { method: 'DELETE' });
 }
