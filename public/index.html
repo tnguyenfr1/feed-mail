@@ -557,7 +557,7 @@ function renderSearch() {
   if (!sr.q) { $('#feed').innerHTML = `<div class="empty">Search every account: names, addresses, subjects or words in the email.<br><br><small>Gmail understands its own search words too, like <b>from:anna</b> or <b>has:attachment</b>.</small></div>`; return; }
   if (sr.loading) { $('#feed').innerHTML = `<div class="empty"><span class="ptr-spin">↻</span> Searching all accounts for “${esc(sr.q)}”…</div>`; return; }
   const scope = state.filter === 'all' ? 'all accounts' : acctName(state.filter);
-  let html = `<div class="search-head">${sr.items.length ? sr.items.length + (sr.items.length >= 30 ? '+' : '') : 'No'} result${sr.items.length === 1 ? '' : 's'} for “${esc(sr.q)}” in ${esc(scope)}</div>${errs}`;
+  let html = `<div class="search-head">${sr.items.length ? sr.items.length + (sr.items.length >= 30 ? '+' : '') : 'No'} result${sr.items.length === 1 ? '' : 's'} for “${esc(sr.q)}” in ${esc(scope)}${sr.partial ? ' · <span class="ptr-spin">↻</span> still searching…' : ''}</div>${errs}`;
   for (const it of sr.items) {
     const a = acctOf(it.acct);
     const who = it.mine ? `Me → ${(it.to || []).map(shortName).join(', ')}` : (it.from?.name || it.from?.address || 'Unknown');
@@ -597,14 +597,21 @@ async function runSearch(q) {
   sr.q = q.trim(); sr.loading = true; sr.items = [];
   renderFeed();
   const token = Symbol(); sr.token = token;
-  try {
-    const r = await api(`/search?q=${encodeURIComponent(sr.q)}${state.filter !== 'all' ? '&acct=' + state.filter : ''}`);
+  sr.status = {};
+  // One request per account, shown as each answers: fast accounts don't wait for slow ones.
+  const which = state.filter === 'all' ? state.accounts : state.accounts.filter((a) => a.id === state.filter);
+  let pending = which.length;
+  await Promise.all(which.map(async (a) => {
+    let r;
+    try { r = await api(`/search?q=${encodeURIComponent(sr.q)}&acct=${a.id}`); }
+    catch (err) { r = { items: [], status: { [a.id]: { error: err.message } } }; }
     if (state.search !== sr || sr.token !== token) return;
-    sr.items = r.items; sr.status = r.status;
-  } catch (err) { if (state.search === sr) sr.status = { x: { error: err.message } }; }
-  if (state.search !== sr) return;
-  sr.loading = false;
-  renderFeed();
+    sr.items = [...sr.items, ...r.items].sort((x, y) => (x.date < y.date ? 1 : -1));
+    Object.assign(sr.status, r.status);
+    sr.loading = --pending > 0 && !sr.items.length;
+    sr.partial = pending > 0;
+    renderFeed();
+  }));
 }
 
 function renderFeed() {
