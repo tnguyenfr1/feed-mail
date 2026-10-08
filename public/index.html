@@ -319,6 +319,13 @@ html, body { overflow-x: hidden; }
 .compose .cc-toggle { border: 0; background: none; color: var(--accent); font-size: 13px; padding: 4px 0; flex: none; }
 .compose textarea { width: 100%; min-height: 260px; border: 0; background: none; padding: 14px 0; resize: vertical; outline: none; font-size: 15px; line-height: 1.5; }
 .compose .c-bottom { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 8px; border-top: 1px solid var(--line); }
+/* ---------- search ---------- */
+.searchbar { display: flex; gap: 8px; padding: 0 16px 10px; }
+.searchbar input { flex: 1; min-width: 0; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--accent);
+  background: var(--card); outline: none; font-size: 15px; }
+.search-head { color: var(--muted); font-size: 13px; padding: 6px 6px 2px; }
+.card .boxtag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px; margin-left: 6px; }
+@media (max-width: 420px) { header.top .icon-btn { width: 36px; height: 36px; } header.top { gap: 5px; } }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
 </style>
@@ -345,6 +352,9 @@ html, body { overflow-x: hidden; }
       <div class="seg" id="viewToggle" role="group" aria-label="View">
         <button data-v="conv" title="Conversations"><span class="long">Conversations</span><span class="short">Threads</span></button><button data-v="all" title="Every email">All</button>
       </div>
+      <button class="icon-btn" id="searchBtn" title="Search" aria-label="Search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      </button>
       <button class="icon-btn" id="calBtn" title="Calendar" aria-label="Calendar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
       </button>
@@ -355,6 +365,10 @@ html, body { overflow-x: hidden; }
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
       </button>
     </header>
+    <form class="searchbar" id="searchBar" hidden>
+      <input type="search" id="searchInput" placeholder="Search all mail…" enterkeyhint="search" autocomplete="off">
+      <button type="button" class="icon-btn" id="searchClose" aria-label="Close search">✕</button>
+    </form>
     <div class="chips" id="chips"></div>
     <div id="banners"></div>
     <div id="ptr" aria-live="polite"></div>
@@ -479,6 +493,7 @@ function renderChips() {
 $('#chips').addEventListener('click', (e) => {
   const b = e.target.closest('.chip'); if (!b) return;
   state.filter = b.dataset.f; renderChips(); renderFeed();
+  if (state.search?.q) runSearch(state.search.q);
 });
 
 function initials(from) {
@@ -534,7 +549,66 @@ function feedEntries() {
 
 const shortName = (p) => (p?.name || p?.address || '?').split(/[\s@]/)[0];
 
+function renderSearch() {
+  const sr = state.search;
+  const acctName = (id) => acctLabel(acctOf(id));
+  const errs = Object.entries(sr.status || {}).filter(([, v]) => v.error)
+    .map(([id, v]) => `<div class="banner"><b>${esc(acctName(id))}:</b> ${esc(v.error)}</div>`).join('');
+  if (!sr.q) { $('#feed').innerHTML = `<div class="empty">Search every account: names, addresses, subjects or words in the email.<br><br><small>Gmail understands its own search words too, like <b>from:anna</b> or <b>has:attachment</b>.</small></div>`; return; }
+  if (sr.loading) { $('#feed').innerHTML = `<div class="empty"><span class="ptr-spin">↻</span> Searching all accounts for “${esc(sr.q)}”…</div>`; return; }
+  const scope = state.filter === 'all' ? 'all accounts' : acctName(state.filter);
+  let html = `<div class="search-head">${sr.items.length ? sr.items.length + (sr.items.length >= 30 ? '+' : '') : 'No'} result${sr.items.length === 1 ? '' : 's'} for “${esc(sr.q)}” in ${esc(scope)}</div>${errs}`;
+  for (const it of sr.items) {
+    const a = acctOf(it.acct);
+    const who = it.mine ? `Me → ${(it.to || []).map(shortName).join(', ')}` : (it.from?.name || it.from?.address || 'Unknown');
+    html += `<button class="card ${it.seen ? '' : 'unread'}" style="--acct:${a.color}" data-sid="${esc(it.id)}">
+      <div class="row">
+        <div class="avatar">${esc(it.mine ? 'Me' : initials(it.from))}</div>
+        <div class="who"><div class="name">${esc(who)}</div>
+          <div class="acct">${esc(acctLabel(a))}${it.box === 'sent' ? '<span class="boxtag">Sent</span>' : ''}</div></div>
+        <div class="when">${esc(fmtWhen(it.date))}</div>
+      </div>
+      <div class="subject">${esc(it.subject)}<span class="tags">${it.attach ? '📎' : ''}</span></div>
+      ${it.preview ? `<div class="preview">${esc(it.preview)}</div>` : ''}
+    </button>`;
+  }
+  $('#feed').innerHTML = html;
+}
+
+function openSearch() {
+  if (state.search) return $('#searchInput').focus();
+  pushLayer('search');
+  state.search = { q: '', items: [], status: {}, loading: false };
+  $('#searchBar').hidden = false;
+  $('#searchInput').value = '';
+  renderFeed();
+  $('#searchInput').focus();
+}
+function closeSearch(fromHistory = false) {
+  if (!state.search) return;
+  if (!fromHistory && !popLayer('search')) return;
+  state.search = null;
+  $('#searchBar').hidden = true;
+  renderFeed();
+}
+async function runSearch(q) {
+  const sr = state.search;
+  if (!sr || !q.trim()) return;
+  sr.q = q.trim(); sr.loading = true; sr.items = [];
+  renderFeed();
+  const token = Symbol(); sr.token = token;
+  try {
+    const r = await api(`/search?q=${encodeURIComponent(sr.q)}${state.filter !== 'all' ? '&acct=' + state.filter : ''}`);
+    if (state.search !== sr || sr.token !== token) return;
+    sr.items = r.items; sr.status = r.status;
+  } catch (err) { if (state.search === sr) sr.status = { x: { error: err.message } }; }
+  if (state.search !== sr) return;
+  sr.loading = false;
+  renderFeed();
+}
+
 function renderFeed() {
+  if (state.search) return renderSearch();
   if (!state.accounts.length) {
     $('#feed').innerHTML = `<div class="empty">No accounts yet.<br><br><button class="btn" onclick="openSettings()">Add an email account</button></div>`;
     return;
@@ -570,6 +644,12 @@ function renderFeed() {
   $('#feed').innerHTML = html;
 }
 $('#feed').addEventListener('click', (e) => {
+  const sc = e.target.closest('[data-sid]');
+  if (sc) {
+    const it = state.search?.items.find((x) => x.id === sc.dataset.sid);
+    if (it) { it.seen = true; openConversation({ key: 's:' + it.id, latest: it, items: [it], single: true }); }
+    return;
+  }
   const c = e.target.closest('.card'); if (!c) return;
   const g = feedEntries().find((x) => x.key === c.dataset.key);
   if (g) openConversation(g);
@@ -580,7 +660,7 @@ const linkify = (s) => esc(s).replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, 
 const fmtAddr = (a) => a ? (a.name ? `${a.name} <${a.address}>` : a.address) : '';
 const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
 const fmtLong = (iso) => new Date(iso).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-const msgUrl = (m, extra = '') => `/msg/${m.acct}/${encodeURIComponent(m.uid)}${extra}${m.box === 'sent' ? '?box=sent' : ''}`;
+const msgUrl = (m, extra = '') => `/msg/${m.acct}/${encodeURIComponent(m.uid)}${extra}${m.box && m.box !== 'inbox' ? '?box=' + m.box : ''}`;
 
 // Opening an email or the Accounts sheet adds a history step, so the phone's
 // back gesture/button closes it instead of leaving the app.
@@ -600,6 +680,7 @@ window.addEventListener('popstate', () => {
   const sheet = $('.sheet-back');
   if (sheet && history.state?.fm !== 'sheet') { sheet._close?.(true); return; }
   if (state.current && history.state?.fm !== 'reader') { closeReader(true); return; }
+  if (state.search && history.state?.fm !== 'search') { closeSearch(true); return; }
   if (history.state?.fm === 'root') {
     if (Date.now() - leaveWarnedAt < 2000) { history.back(); return; }
     leaveWarnedAt = Date.now();
@@ -623,9 +704,10 @@ async function openConversation(g) {
   renderChips(); renderFeed();
 
   // Start loading the newest message while the conversation list loads.
-  conv.prefetch = { uid: latest.uid, promise: api(msgUrl({ ...latest, box: 'inbox' })).catch((err) => ({ error: err.message })) };
-  let list = g.items.slice().reverse().map((x) => ({ ...x, box: 'inbox' }));
-  if (state.view === 'conv' && (g.items.length > 1 || latest.threadSent)) {
+  const boxOfItem = (x) => x.box || 'inbox';
+  conv.prefetch = { uid: latest.uid, box: boxOfItem(latest), promise: api(msgUrl({ ...latest, box: boxOfItem(latest) })).catch((err) => ({ error: err.message })) };
+  let list = g.items.slice().reverse().map((x) => ({ ...x, box: boxOfItem(x) }));
+  if (!g.single && state.view === 'conv' && (g.items.length > 1 || latest.threadSent)) {
     try { list = await api(`/thread/${latest.acct}/${encodeURIComponent(latest.thread)}`); } catch {}
   }
   if (state.current !== conv) return;
@@ -893,7 +975,7 @@ function frameDoc(html, showImages, dark = false) {
     </head><body>${html}</body></html>`;
 }
 
-const isMe = (conv, m) => m.meta.box === 'sent';
+const isMe = (conv, m) => m.meta.box === 'sent' || !!m.meta.mine;
 const recipientsOf = (m) => (m.full ? [...m.full.to, ...m.full.cc] : m.meta.to || []);
 
 function messageHtml(conv, m, idx) {
@@ -1004,7 +1086,7 @@ async function loadFull(conv, m) {
   if (!m.meta.uid) return;
   try {
     const pre = conv.prefetch;
-    if (pre && m.meta.box === 'inbox' && String(pre.uid) === String(m.meta.uid)) {
+    if (pre && (m.meta.box || 'inbox') === pre.box && String(pre.uid) === String(m.meta.uid)) {
       conv.prefetch = null;
       m.full = await pre.promise;
     } else {
@@ -1127,7 +1209,7 @@ function setupComposer(conv) {
       b.disabled = true; b.textContent = 'Sending…';
       try {
         const attachments = await Promise.all(files.map(async (f) => ({ filename: f.name, contentType: f.type, data: await fileToBase64(f) })));
-        await api(`/msg/${conv.acct}/${encodeURIComponent(t.meta.uid)}/reply${t.meta.box === 'sent' ? '?box=sent' : ''}`,
+        await api(`/msg/${conv.acct}/${encodeURIComponent(t.meta.uid)}/reply${t.meta.box && t.meta.box !== 'inbox' ? '?box=' + t.meta.box : ''}`,
           { method: 'POST', body: { body, all: !!$('#replyAll').checked, attachments } });
         $('#replyText').value = '';
         files.length = 0; renderFiles();
@@ -1514,6 +1596,9 @@ async function openSettings() {
 }
 $('#settingsBtn').onclick = openSettings;
 $('#calBtn').onclick = openAgenda;
+$('#searchBtn').onclick = openSearch;
+$('#searchClose').onclick = () => closeSearch();
+$('#searchBar').addEventListener('submit', (e) => { e.preventDefault(); $('#searchInput').blur(); runSearch($('#searchInput').value); });
 $('#composeBtn').onclick = openCompose;
 $('#viewToggle').addEventListener('click', (e) => { const b = e.target.closest('[data-v]'); if (b) setView(b.dataset.v); });
 setView(state.view);
@@ -1531,7 +1616,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && st
     try {
       const { v } = await (await fetch('/version', { cache: 'no-store' })).json();
       if (loaded === null) { loaded = v; return; }
-      if (v !== loaded && !state.current && !state.draft && !$('.sheet-back')) location.reload();
+      if (v !== loaded && !state.current && !state.draft && !state.search && !$('.sheet-back')) location.reload();
     } catch {}
   };
   check();

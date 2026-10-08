@@ -100,6 +100,25 @@ export async function getThread(acct, key) {
   }).sort((a, b) => (a.date < b.date ? -1 : 1));
 }
 
+export async function search(acct, q, limit) {
+  const sent = await sentState(acct);
+  const me = acct.email.toLowerCase();
+  const r = await graph(acct, '/me/messages', {
+    query: { $search: `"${q.replace(/["\\]/g, ' ')}"`, $top: String(limit), $select: LIST_FIELDS },
+  });
+  return (r.value || []).filter((m) => !m.isDraft).map((m) => {
+    const box = m.parentFolderId === sent.folderId ? 'sent' : 'inbox';
+    const from = person(m.from);
+    return {
+      id: `${acct.id}:${box}:${m.id}`, acct: acct.id, uid: m.id, box,
+      mine: box === 'sent' || from?.address?.toLowerCase() === me,
+      date: utc(box === 'sent' ? m.sentDateTime : m.receivedDateTime),
+      from, to: people(m.toRecipients), subject: m.subject || '(no subject)',
+      preview: preview(m.bodyPreview), seen: !!m.isRead, attach: !!m.hasAttachments,
+    };
+  }).sort((a, b) => (a.date < b.date ? 1 : -1));
+}
+
 const htmlToText = (html) => String(html || '')
   .replace(/<(style|script)[^>]*>[\s\S]*?<\/\1>/gi, '')
   .replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|tr|li|h\d)>/gi, '\n')

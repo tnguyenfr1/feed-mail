@@ -277,7 +277,29 @@ app.get('/api/feed', async (req, res) => {
   res.json({ items, status });
 });
 
-const boxOf = (req) => (req.query.box === 'sent' ? 'sent' : 'inbox');
+const boxOf = (req) => (['sent', 'all'].includes(req.query.box) ? req.query.box : 'inbox');
+
+app.get('/api/search', async (req, res) => {
+  const q = String(req.query.q || '').trim().slice(0, 200);
+  if (!q) return res.json({ items: [], status: {} });
+  const which = req.query.acct ? accounts.filter((a) => a.id === req.query.acct) : accounts;
+  const items = [];
+  const status = {};
+  await Promise.all(which.map(async (a) => {
+    try {
+      const found = await Promise.race([
+        mail.search(a, q),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Search took too long')), 25000)),
+      ]);
+      items.push(...found);
+      status[a.id] = { count: found.length };
+    } catch (err) {
+      status[a.id] = { error: err.message };
+    }
+  }));
+  items.sort((x, y) => (x.date < y.date ? 1 : -1));
+  res.json({ items, status });
+});
 
 app.get('/api/thread/:acct/:key', async (req, res, next) => {
   try {

@@ -115,10 +115,17 @@ async function sentPath(acct) {
   return c.fmSentPath;
 }
 
+async function allMailPath(acct) {
+  const c = await getClient(acct);
+  if (c.fmAllPath === undefined) c.fmAllPath = (await findSpecial(c, '\\All')) || null;
+  return c.fmAllPath;
+}
+
+// Messages live in INBOX, the Sent folder, or (Gmail search results) All Mail.
 async function boxPath(acct, box) {
-  if (box !== 'sent') return 'INBOX';
-  const path = await sentPath(acct);
-  if (!path) throw Object.assign(new Error('No Sent folder found.'), { status: 404 });
+  if (box === 'inbox') return 'INBOX';
+  const path = box === 'all' ? await allMailPath(acct) : await sentPath(acct);
+  if (!path) throw Object.assign(new Error(`No ${box === 'all' ? 'All Mail' : 'Sent'} folder found.`), { status: 404 });
   return path;
 }
 
@@ -282,6 +289,85 @@ function addr(a) {
   return a ? { name: a.name || '', address: a.address || '' } : null;
 }
 
+// Feed card data from a fetched message (headers + a short preview).
+async function baseItem(acct, m, box = 'inbox') {
+  let preview = '';
+  try {
+    preview = makePreview(await simpleParser(m.source, { skipImageLinks: true, skipTextToHtml: true }));
+  } catch {}
+  const env = m.envelope || {};
+  return {
+    id: box === 'inbox' ? `${acct.id}:${m.uid}` : `${acct.id}:${box}:${m.uid}`,
+    acct: acct.id,
+    uid: m.uid,
+    date: (env.date || m.internalDate || new Date()).toISOString(),
+    from: addr(env.from?.[0]),
+    to: (env.to || []).map(addr),
+    subject: env.subject || '(no subject)',
+    messageId: env.messageId || null,
+    inReplyTo: msgIds(env.inReplyTo),
+    refs: refsFrom(m.headers),
+    gThread: m.threadId || null,
+    attach: hasAttachment(m.bodyStructure),
+    preview,
+  };
+}
+
+// ---------- search ----------
+// The provider searches its own servers: Gmail all mail (with Gmail's own
+// search syntax), other accounts their inbox and Sent folders.
+const SEARCH_LIMIT = 30;
+
+const searchCache = new Map(); // `${acct}|${q}` -> { at, items }
+
+export async function search(acct, q) {
+  const key = `${acct.id}|${q.toLowerCase()}`;
+  const hit = searchCache.get(key);
+  if (hit && Date.now() - hit.at < 2 * 60 * 1000) return hit.items;
+  const items = await runSearch(acct, q);
+  searchCache.set(key, { at: Date.now(), items });
+  if (searchCache.size > 100) searchCache.delete(searchCache.keys().next().value);
+  return items;
+}
+
+async function runSearch(acct, q) {
+  if (viaGraph(acct)) return outlook.search(acct, q, SEARCH_LIMIT);
+  const boxes = isGmail(acct)
+    ? [{ box: 'all', path: await allMailPath(acct), query: { gmraw: q } }]
+    : [{ box: 'inbox', path: 'INBOX', query: { text: q } }, { box: 'sent', path: await sentPath(acct), query: { text: q } }];
+  const me = acct.email.toLowerCase();
+  const items = [];
+  for (const b of boxes.filter((x) => x.path)) {
+    // Inbox messages already in the feed reuse their preview; only the rest are downloaded.
+    const cached = b.box === 'inbox' ? known.get(acct.id)?.byUid : null;
+    const found = await withMailbox(acct, b.path, async (c) => {
+      const uids = (await c.search(b.query, { uid: true })) || [];
+      const pick = uids.sort((x, y) => y - x).slice(0, SEARCH_LIMIT);
+      const out = [];
+      if (!pick.length) return out;
+      const flags = new Map();
+      for await (const m of c.fetch(pick.join(','), { uid: true, flags: true }, { uid: true })) flags.set(m.uid, m.flags);
+      const missing = pick.filter((u) => !cached?.has(u));
+      if (missing.length) {
+        for await (const m of c.fetch(missing.join(','), {
+          uid: true, envelope: true, internalDate: true, bodyStructure: true, headers: ['references'],
+          source: { maxLength: PREVIEW_BYTES },
+        }, { uid: true })) out.push({ m, flags: flags.get(m.uid) });
+      }
+      for (const u of pick) if (cached?.has(u)) out.push({ base: cached.get(u), flags: flags.get(u) });
+      return out;
+    }, { fresh: true });
+    for (const f of found) {
+      const m = { flags: f.flags };
+      const { refs, inReplyTo, gThread, ...item } = f.base || await baseItem(acct, f.m, b.box);
+      // In All Mail, my own messages behave like Sent ones (reply = follow-up).
+      const mine = item.from?.address?.toLowerCase() === me;
+      items.push({ ...item, box: b.box, mine: b.box === 'sent' || mine, seen: m.flags?.has('\\Seen') || false, attach: item.attach });
+    }
+  }
+  return items.sort((x, y) => (x.date < y.date ? 1 : -1)).slice(0, SEARCH_LIMIT);
+}
+
 // Per account: what we already know about each message (headers + preview),
 // so a refresh only downloads new mail. Memory only.
 const known = new Map(); // account id -> { validity, byUid: Map(uid -> item) }
@@ -312,28 +398,7 @@ export async function fetchFeed(acct) {
 
   const prev = known.get(acct.id);
   const byUid = prev && prev.validity === validity ? prev.byUid : new Map();
-  for (const m of fresh) {
-    let preview = '';
-    try {
-      preview = makePreview(await simpleParser(m.source, { skipImageLinks: true, skipTextToHtml: true }));
-    } catch {}
-    const env = m.envelope || {};
-    byUid.set(m.uid, {
-      id: `${acct.id}:${m.uid}`,
-      acct: acct.id,
-      uid: m.uid,
-      date: (env.date || m.internalDate || new Date()).toISOString(),
-      from: addr(env.from?.[0]),
-      to: (env.to || []).map(addr),
-      subject: env.subject || '(no subject)',
-      messageId: env.messageId || null,
-      inReplyTo: msgIds(env.inReplyTo),
-      refs: refsFrom(m.headers),
-      gThread: m.threadId || null,
-      attach: hasAttachment(m.bodyStructure),
-      preview,
-    });
-  }
+  for (const m of fresh) byUid.set(m.uid, await baseItem(acct, m));
   // Forget messages that dropped out of the window (deleted, moved, or old).
   const current = new Set(flags.map((m) => m.uid));
   for (const uid of byUid.keys()) if (!current.has(uid)) byUid.delete(uid);
@@ -393,7 +458,7 @@ export async function getMessage(acct, uid, box = 'inbox') {
 
   const { parsed } = await withMailbox(acct, await boxPath(acct, box), async (c) => {
     const r = await fetchParsed(acct, uid, c);
-    if (box === 'inbox' && !r.flags?.has('\\Seen')) await c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+    if (box !== 'sent' && !r.flags?.has('\\Seen')) await c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
     return r;
   });
 
@@ -519,7 +584,8 @@ export function replyRecipients(acct, parsed, box, all) {
   const same = (a, b) => a.address?.toLowerCase() === b.address?.toLowerCase();
   const notMe = (a) => a.address && a.address.toLowerCase() !== me;
   let to, rest;
-  if (box === 'sent') {
+  const fromMe = list(parsed.from).some((a) => a.address?.toLowerCase() === me);
+  if (box === 'sent' || fromMe) {
     to = list(parsed.to).filter(notMe);
     rest = list(parsed.cc);
   } else {

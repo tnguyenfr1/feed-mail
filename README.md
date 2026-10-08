@@ -13,6 +13,8 @@ All your email accounts in one feed, with your calendars beside every email. It 
 - **One feed for every inbox:** Gmail, Outlook/Hotmail, Yahoo, AOL and GMX, newest first, each account in its own colour.
 - **Conversations:** messages are grouped into threads, including your own replies from the Sent folder. You can also switch to a plain list of every email.
 - **Reply to any message in a thread,** not only the last one. Each reply is linked to the exact message it answers, so it threads correctly for everyone.
+- **Search across all accounts.** Each provider searches its own servers: all of Gmail (Gmail's search words like `from:` and `has:attachment` work), all Outlook folders, and the inbox and Sent folders elsewhere.
+- **Write new emails** from any account, with address suggestions, Cc/Bcc and attachments.
 - **Knows what you've replied to.** It reads your Sent folder, so replies made from any app count.
 - **All your calendars in one place:** a two-week agenda, plus a strip in each email that shows the day it mentions ("Thursday at 3pm", "12 octobre"). Meeting invitations get clash warnings and Accept / Maybe / Decline buttons.
 - **Installs on a phone like an app,** with back gestures, pull-to-refresh, and wide newsletters zoomed to fit the screen.
