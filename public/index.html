@@ -342,6 +342,25 @@ html, body { overflow-x: hidden; }
 .ev-form .ev-check, .ev-form .ev-cal { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
 .ev-form .ev-cal select { flex: 1; }
 .ev-form .ev-btns { display: flex; gap: 8px; }
+/* ---------- swipe / quick actions ---------- */
+.swipe { position: relative; margin-bottom: 8px; border-radius: var(--radius); overflow: hidden; }
+#feed { overflow-x: hidden; }
+.swipe .card { margin-bottom: 0; touch-action: pan-y; position: relative; z-index: 1; }
+.swipe-bg { position: absolute; inset: 0; border-radius: var(--radius); display: none; align-items: center;
+  justify-content: space-between; padding: 0 20px; font-weight: 700; color: #fff; }
+.swipe.swiping .swipe-bg { display: flex; }
+.swipe.to-del .swipe-bg { background: color-mix(in srgb, var(--danger) 55%, var(--card)); }
+.swipe.to-read .swipe-bg { background: color-mix(in srgb, var(--accent) 55%, var(--card)); }
+.swipe.armed.to-del .swipe-bg { background: var(--danger); }
+.swipe.armed.to-read .swipe-bg { background: var(--accent); }
+.swipe.to-del .sw-read, .swipe.to-read .sw-del { visibility: hidden; }
+.card-acts { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); z-index: 2; display: none; gap: 6px; }
+.card-acts button { width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--line); background: var(--card);
+  font-size: 15px; box-shadow: var(--shadow); }
+.card-acts button:hover { border-color: var(--accent); }
+@media (hover: hover) and (pointer: fine) { .swipe:hover .card-acts { display: flex; } }
+.toast { display: flex; align-items: center; gap: 14px; }
+.toast-act { border: 0; background: none; color: var(--accent); font-weight: 700; padding: 2px 4px; font-size: 14px; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; max-width: calc(100% - 32px); }
 </style>
@@ -419,11 +438,18 @@ async function api(path, opts = {}) {
   return data;
 }
 
-function toast(msg) {
+function toast(msg, action) {
+  document.querySelectorAll('.toast').forEach((x) => x.remove());
   const t = document.createElement('div');
   t.className = 'toast'; t.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'toast-act'; b.textContent = action.label;
+    b.onclick = () => { t.remove(); action.onClick(); };
+    t.append(b);
+  }
   document.body.append(t);
-  setTimeout(() => t.remove(), 3000);
+  setTimeout(() => t.remove(), action?.ms || 3000);
 }
 
 // ---------- login ----------
@@ -547,7 +573,7 @@ function setView(v) {
 
 // Turn the flat list of inbox emails into feed entries.
 function feedEntries() {
-  const items = state.items.filter((i) => state.filter === 'all' || i.acct === state.filter);
+  const items = state.items.filter((i) => (state.filter === 'all' || i.acct === state.filter) && !pendingDeletes.has(i.id));
   if (state.view !== 'conv') return items.map((it) => ({ key: it.id, latest: it, items: [it] }));
   const groups = new Map();
   for (const it of items) {
@@ -586,7 +612,7 @@ function renderSearch() {
       </div>
       <div class="subject">${esc(it.subject)}<span class="tags">${it.attach ? '📎' : ''}</span></div>
       ${it.preview ? `<div class="preview">${esc(it.preview)}</div>` : ''}
-    </button>`;
+    </button></div>`;
   }
   $('#feed').innerHTML = html;
 }
@@ -653,7 +679,10 @@ function renderFeed() {
     const people = state.view === 'conv' && count > 1
       ? [...new Set([...g.items.map((x) => shortName(x.from)), ...(mine ? ['me'] : [])])].slice(0, 3).join(', ')
       : (it.from?.name || it.from?.address || 'Unknown');
-    html += `<button class="card ${unread ? 'unread' : ''} ${active ? 'active' : ''}" style="--acct:${a.color}" data-key="${esc(g.key)}">
+    html += `<div class="swipe" data-key="${esc(g.key)}">
+      <div class="swipe-bg"><span class="sw-read">✉ ${unread ? 'Read' : 'Unread'}</span><span class="sw-del">Delete 🗑</span></div>
+      <div class="card-acts"><button data-qa="read" title="${unread ? 'Mark read' : 'Mark unread'}" aria-label="${unread ? 'Mark read' : 'Mark unread'}">✉</button><button data-qa="delete" title="Delete" aria-label="Delete">🗑</button></div>
+      <button class="card ${unread ? 'unread' : ''} ${active ? 'active' : ''}" style="--acct:${a.color}" data-key="${esc(g.key)}">
       <div class="row">
         <div class="avatar">${esc(initials(it.from))}</div>
         <div class="who"><div class="name">${esc(people)}${count > 1 ? ` <span class="cnt">${count}</span>` : ''}</div>
@@ -662,7 +691,7 @@ function renderFeed() {
       </div>
       <div class="subject">${repliedAt !== null ? `<span class="rp">↩ Replied${repliedAt ? ' · ' + esc(fmtWhen(repliedAt)) : ''}</span>` : ''}${esc(it.subject)}<span class="tags">${g.items.some((x) => x.attach) ? '📎' : ''}</span></div>
       ${it.preview ? `<div class="preview">${esc(it.preview)}</div>` : ''}
-    </button>`;
+    </button></div>`;
   }
   $('#feed').innerHTML = html;
 }
@@ -673,10 +702,120 @@ $('#feed').addEventListener('click', (e) => {
     if (it) { it.seen = true; openConversation({ key: 's:' + it.id, latest: it, items: [it], single: true }); }
     return;
   }
+  const qa = e.target.closest('[data-qa]');
+  if (qa) {
+    const g = feedEntries().find((x) => x.key === qa.closest('.swipe').dataset.key);
+    if (g) qa.dataset.qa === 'delete' ? quickDelete(g) : quickToggleRead(g);
+    return;
+  }
   const c = e.target.closest('.card'); if (!c) return;
+  if (justSwiped) return;
   const g = feedEntries().find((x) => x.key === c.dataset.key);
   if (g) openConversation(g);
 });
+
+// ---------- quick actions: swipe a card, or hover buttons on computers ----------
+const pendingDeletes = new Map(); // item id -> timer; deleted for real after the Undo window
+let justSwiped = false;
+const UNDO_MS = 5000;
+
+function quickDelete(g) {
+  const items = g.items.filter((x) => (x.box || 'inbox') === 'inbox');
+  if (!items.length) return;
+  const commit = (it) => {
+    pendingDeletes.delete(it.id);
+    api(`/msg/${it.acct}/${encodeURIComponent(it.uid)}`, { method: 'DELETE' })
+      .then(() => { state.items = state.items.filter((x) => x.id !== it.id); })
+      .catch((err) => { toast(`Couldn't delete: ${err.message}`); renderFeed(); });
+  };
+  for (const it of items) pendingDeletes.set(it.id, setTimeout(() => commit(it), UNDO_MS));
+  renderChips(); renderFeed();
+  toast(items.length > 1 ? `${items.length} emails moved to Trash` : 'Moved to Trash', {
+    label: 'Undo', ms: UNDO_MS,
+    onClick: () => {
+      for (const it of items) { clearTimeout(pendingDeletes.get(it.id)); pendingDeletes.delete(it.id); }
+      renderChips(); renderFeed();
+    },
+  });
+}
+
+// If the app is closed or hidden during the Undo window, delete straight away.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden || !pendingDeletes.size) return;
+  for (const [id, timer] of pendingDeletes) {
+    clearTimeout(timer);
+    const it = state.items.find((x) => x.id === id);
+    if (it) fetch(`/api/msg/${it.acct}/${encodeURIComponent(it.uid)}`, { method: 'DELETE', keepalive: true }).catch(() => {});
+  }
+  state.items = state.items.filter((x) => !pendingDeletes.has(x.id));
+  pendingDeletes.clear();
+});
+
+async function quickToggleRead(g) {
+  const items = g.items.filter((x) => (x.box || 'inbox') === 'inbox');
+  const makeRead = items.some((x) => !x.seen);
+  // Reading marks the whole conversation; "unread" just flags the newest one.
+  const targets = makeRead ? items.filter((x) => !x.seen) : items.slice(0, 1);
+  for (const it of targets) it.seen = makeRead;
+  renderChips(); renderFeed();
+  try {
+    await Promise.all(targets.map((it) => api(`/msg/${it.acct}/${encodeURIComponent(it.uid)}/seen`, { method: 'POST', body: { seen: makeRead } })));
+  } catch (err) {
+    for (const it of targets) it.seen = !makeRead;
+    renderChips(); renderFeed();
+    toast(err.message);
+  }
+}
+
+(() => {
+  const feed = $('#feed');
+  let sw = null; // { el, card, x0, y0, dx, horizontal }
+  const width = () => sw.el.clientWidth;
+  feed.addEventListener('touchstart', (e) => {
+    const el = e.target.closest('.swipe');
+    if (!el || state.search || e.touches.length > 1) return;
+    sw = { el, card: $('.card', el), x0: e.touches[0].clientX, y0: e.touches[0].clientY, dx: 0, horizontal: null };
+  }, { passive: true });
+  feed.addEventListener('touchmove', (e) => {
+    if (!sw) return;
+    const dx = e.touches[0].clientX - sw.x0, dy = e.touches[0].clientY - sw.y0;
+    if (sw.horizontal === null) {
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+      sw.horizontal = Math.abs(dx) > Math.abs(dy) * 1.2;
+      if (!sw.horizontal) { sw = null; return; } // a normal vertical scroll
+      sw.el.classList.add('swiping');
+    }
+    sw.dx = dx;
+    sw.card.style.transform = `translateX(${dx}px)`;
+    const far = Math.abs(dx) > width() * 0.33;
+    sw.el.classList.toggle('to-del', dx < 0);
+    sw.el.classList.toggle('to-read', dx > 0);
+    sw.el.classList.toggle('armed', far);
+  }, { passive: true });
+  const end = () => {
+    if (!sw) return;
+    const { el, card, dx, horizontal } = sw;
+    sw = null;
+    if (!horizontal) return;
+    justSwiped = true; setTimeout(() => { justSwiped = false; }, 350);
+    const g = feedEntries().find((x) => x.key === el.dataset.key);
+    const far = Math.abs(dx) > el.clientWidth * 0.33;
+    card.style.transition = 'transform .2s ease-out';
+    if (far && dx < 0 && g) {
+      card.style.transform = 'translateX(-110%)';
+      el.style.transition = 'height .2s ease-out .15s, margin .2s ease-out .15s, opacity .2s .15s';
+      el.style.height = el.offsetHeight + 'px';
+      requestAnimationFrame(() => { el.style.height = '0px'; el.style.opacity = '0'; el.style.marginBottom = '0'; });
+      setTimeout(() => quickDelete(g), 380);
+    } else {
+      card.style.transform = '';
+      setTimeout(() => { card.style.transition = ''; el.classList.remove('swiping', 'to-del', 'to-read', 'armed'); }, 200);
+      if (far && dx > 0 && g) setTimeout(() => quickToggleRead(g), 150);
+    }
+  };
+  feed.addEventListener('touchend', end);
+  feed.addEventListener('touchcancel', end);
+})();
 
 // ---------- reader: a conversation (one or more messages) ----------
 const linkify = (s) => esc(s).replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
@@ -1327,7 +1466,7 @@ function fileToBase64(file) {
   feed.addEventListener('touchmove', (e) => {
     if (y0 === null) return;
     dy = e.touches[0].clientY - y0;
-    if (dy <= 0 || feed.scrollTop > 0) { show(0, ''); return; }
+    if (dy <= 0 || feed.scrollTop > 0 || $('.swipe.swiping')) { show(0, ''); dy = 0; return; }
     const h = Math.min(90, dy * 0.5);
     show(h, h >= PULL * 0.5 + 10 ? '↻ Release to refresh' : '↓ Pull to refresh');
   }, { passive: true });

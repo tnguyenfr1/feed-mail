@@ -14,6 +14,7 @@ All your email accounts in one feed, with your calendars beside every email. It 
 - **Conversations:** messages are grouped into threads, including your own replies from the Sent folder. You can also switch to a plain list of every email.
 - **Reply to any message in a thread,** not only the last one. Each reply is linked to the exact message it answers, so it threads correctly for everyone.
 - **Search across all accounts.** Each provider searches its own servers: all of Gmail (Gmail's search words like `from:` and `has:attachment` work), all Outlook folders, and the inbox and Sent folders elsewhere.
+- **Swipe to tidy up:** swipe a card left to delete (with Undo) or right to mark read/unread. On a computer, hover a card for the same buttons.
 - **Write new emails** from any account, with address suggestions, Cc/Bcc and attachments.
 - **Knows what you've replied to.** It reads your Sent folder, so replies made from any app count.
 - **All your calendars in one place:** a two-week agenda, plus a strip in each email that shows the day it mentions ("Thursday at 3pm", "12 octobre"). Meeting invitations get clash warnings and Accept / Maybe / Decline buttons.
