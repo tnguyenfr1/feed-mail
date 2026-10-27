@@ -21,6 +21,26 @@ const MAX_ATTACH = 20 * 1024 * 1024;
 const config = loadConfig();
 let accounts = loadAccounts();
 const cache = new Map(); // account id -> { at, items, error, pending }
+const junkCache = new Map(); // same, for each account's junk / spam folder
+
+// Every account gets its own colour, so each email shows where it came from.
+const PALETTE = ['#3b6cf6', '#ea4335', '#16a34a', '#7c3aed', '#ea580c', '#0891b2', '#db2777', '#ca8a04', '#64748b'];
+const freeColor = (wanted) => {
+  const used = new Set(accounts.map((a) => a.color));
+  return wanted && !used.has(wanted) ? wanted : PALETTE.find((c) => !used.has(c)) || PALETTE[accounts.length % PALETTE.length];
+};
+{
+  // Older accounts were often all left on the default blue: spread them out once.
+  const seen = new Set();
+  let changed = false;
+  for (const a of accounts) {
+    if (a.color && !seen.has(a.color)) { seen.add(a.color); continue; }
+    a.color = PALETTE.find((c) => !seen.has(c) && !accounts.some((b) => b.color === c)) || PALETTE.find((c) => !seen.has(c)) || '#64748b';
+    seen.add(a.color);
+    changed = true;
+  }
+  if (changed) saveAccounts(accounts);
+}
 
 const app = express();
 app.disable('x-powered-by');
@@ -99,8 +119,8 @@ app.post('/api/logout', (req, res) => {
 // ---------- Google / Microsoft sign-in (browser redirects, so outside /api) ----------
 
 const OAUTH = {
-  google: { mod: google, provider: 'gmail', configured: () => google.googleConfigured(), colors: ['#ea4335', '#3b6cf6', '#16a34a', '#ca8a04', '#7c3aed'] },
-  microsoft: { mod: microsoft, provider: 'outlook', configured: () => microsoft.microsoftConfigured(), colors: ['#0078d4', '#0891b2', '#7c3aed', '#16a34a'] },
+  google: { mod: google, provider: 'gmail', configured: () => google.googleConfigured(), color: '#ea4335' },
+  microsoft: { mod: microsoft, provider: 'outlook', configured: () => microsoft.microsoftConfigured(), color: '#0891b2' },
 };
 
 // Microsoft rotates refresh tokens; keep the newest one on disk.
@@ -133,7 +153,7 @@ app.get('/oauth/:kind/callback', async (req, res) => {
     const acct = existing
       ? { ...existing, oauth: { refreshToken } }
       : { id: crypto.randomBytes(4).toString('hex'), provider: o.provider, email, oauth: { refreshToken }, name: '',
-          color: o.colors[accounts.filter((a) => a.provider === o.provider).length % o.colors.length] };
+          color: freeColor(o.color) };
     mail.dropClient(acct.id);
     o.mod.forgetToken(acct.id);
     cal.forgetCalendar(acct.id);
@@ -202,7 +222,7 @@ app.post('/api/accounts', async (req, res, next) => {
     const acct = {
       id: crypto.randomBytes(4).toString('hex'),
       provider, email: email.trim(), password: password.replace(/\s+/g, ''),
-      name: (name || '').trim(), color: color || '#4f7cff',
+      name: (name || '').trim(), color: freeColor(color),
     };
     const count = await mail.testLogin(acct);
     accounts.push(acct);
@@ -237,47 +257,65 @@ app.delete('/api/accounts/:id', (req, res, next) => {
     google.forgetToken(req.params.id);
     microsoft.forgetToken(req.params.id);
     cache.delete(req.params.id);
+    junkCache.delete(req.params.id);
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
 
 // ---------- feed ----------
 
-function refresh(acct) {
-  const entry = cache.get(acct.id) || {};
+function refresh(acct, store = cache, fetch = mail.fetchFeed) {
+  const entry = store.get(acct.id) || {};
   if (entry.pending) return entry.pending;
-  entry.pending = mail.fetchFeed(acct)
+  entry.pending = fetch(acct)
     .then((items) => Object.assign(entry, { at: Date.now(), items, error: null }))
     .catch((err) => Object.assign(entry, { at: Date.now(), error: err.message }))
     .finally(() => { entry.pending = null; });
-  cache.set(acct.id, entry);
+  store.set(acct.id, entry);
   return entry.pending;
 }
+const refreshJunk = (acct) => refresh(acct, junkCache, mail.fetchJunk);
 
-app.get('/api/feed', async (req, res) => {
+// Answer from memory, refreshing what's stale; wait only when there's nothing yet.
+async function collect(req, store, refreshOne) {
   const force = req.query.refresh === '1';
   await Promise.all(accounts.map((a) => {
-    const e = cache.get(a.id);
+    const e = store.get(a.id);
     if (force || !e?.items) {
       // Nothing to show yet (or the refresh button): wait, but not forever.
-      return Promise.race([refresh(a), new Promise((r) => setTimeout(r, force ? 8000 : 20000))]);
+      return Promise.race([refreshOne(a), new Promise((r) => setTimeout(r, force ? 8000 : 20000))]);
     }
     // Otherwise answer from memory now and refresh behind the scenes;
     // the page asks again shortly when something was still loading.
-    if (Date.now() - e.at > STALE_MS) refresh(a);
+    if (Date.now() - e.at > STALE_MS) refreshOne(a);
   }));
   const items = [];
   const status = {};
   for (const a of accounts) {
-    const e = cache.get(a.id) || {};
+    const e = store.get(a.id) || {};
     status[a.id] = { error: e.error || null, at: e.at || null, loading: !!e.pending };
     for (const it of e.items || []) items.push(it);
   }
   items.sort((x, y) => (x.date < y.date ? 1 : -1));
-  res.json({ items, status });
+  return { items, status };
+}
+
+app.get('/api/feed', async (req, res) => {
+  const data = await collect(req, cache, (a) => refresh(a));
+  // How much unread junk each account has, so the page can point at it.
+  const junk = {};
+  for (const a of accounts) {
+    const items = junkCache.get(a.id)?.items || [];
+    junk[a.id] = { count: items.length, unread: items.filter((i) => !i.seen).length };
+  }
+  res.json({ ...data, junk });
 });
 
-const boxOf = (req) => (['sent', 'all'].includes(req.query.box) ? req.query.box : 'inbox');
+app.get('/api/junk', async (req, res) => {
+  res.json(await collect(req, junkCache, refreshJunk));
+});
+
+const boxOf = (req) => (['sent', 'all', 'junk'].includes(req.query.box) ? req.query.box : 'inbox');
 
 app.get('/api/search', async (req, res) => {
   const q = String(req.query.q || '').trim().slice(0, 200);
@@ -307,16 +345,20 @@ app.get('/api/thread/:acct/:key', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-function patchCached(acctId, uid, fn) {
-  const it = cache.get(acctId)?.items?.find((x) => String(x.uid) === String(uid));
+function patchCached(acctId, uid, fn, box = 'inbox') {
+  const it = (box === 'junk' ? junkCache : cache).get(acctId)?.items?.find((x) => String(x.uid) === String(uid));
   if (it) fn(it);
+}
+function dropCached(acctId, uid, box = 'inbox') {
+  const e = (box === 'junk' ? junkCache : cache).get(acctId);
+  if (e?.items) e.items = e.items.filter((x) => String(x.uid) !== String(uid));
 }
 
 app.get('/api/msg/:acct/:uid', async (req, res, next) => {
   try {
     const box = boxOf(req);
     const msg = await mail.getMessage(findAccount(req.params.acct), req.params.uid, box);
-    if (box === 'inbox') patchCached(req.params.acct, req.params.uid, (it) => { it.seen = true; });
+    if (box === 'inbox' || box === 'junk') patchCached(req.params.acct, req.params.uid, (it) => { it.seen = true; }, box);
     res.json(msg);
   } catch (err) { next(err); }
 });
@@ -339,17 +381,29 @@ app.get('/api/sent/:acct/:uid', async (req, res, next) => {
 app.post('/api/msg/:acct/:uid/seen', async (req, res, next) => {
   try {
     const seen = !!req.body.seen;
-    await mail.setSeen(findAccount(req.params.acct), req.params.uid, seen);
-    patchCached(req.params.acct, req.params.uid, (it) => { it.seen = seen; });
+    const box = boxOf(req);
+    await mail.setSeen(findAccount(req.params.acct), req.params.uid, seen, box);
+    patchCached(req.params.acct, req.params.uid, (it) => { it.seen = seen; }, box);
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
 
 app.delete('/api/msg/:acct/:uid', async (req, res, next) => {
   try {
-    await mail.deleteMessage(findAccount(req.params.acct), req.params.uid);
-    const e = cache.get(req.params.acct);
-    if (e?.items) e.items = e.items.filter((x) => String(x.uid) !== String(req.params.uid));
+    const box = boxOf(req);
+    await mail.deleteMessage(findAccount(req.params.acct), req.params.uid, box);
+    dropCached(req.params.acct, req.params.uid, box);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// Move a message from Junk back to the inbox.
+app.post('/api/msg/:acct/:uid/notjunk', async (req, res, next) => {
+  try {
+    const acct = findAccount(req.params.acct);
+    await mail.notJunk(acct, req.params.uid);
+    dropCached(acct.id, req.params.uid, 'junk');
+    refresh(acct);
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -530,7 +584,10 @@ app.listen(PORT, HOST, () => console.log(`Feed Mail on http://${HOST}:${PORT}`))
 
 // Keep every inbox and calendar warm in the background so the app is instant.
 const warm = () => accounts.forEach((a) => refresh(a));
+// Junk changes less and matters less: every 2 minutes, after the inboxes.
+const warmJunk = () => accounts.forEach((a) => (cache.get(a.id)?.pending || Promise.resolve()).finally(() => refreshJunk(a)));
 const warmCalendars = () => accounts.filter((a) => calendarKind(a)).forEach((a) => cal.warmCalendar(a));
-setTimeout(() => { warm(); warmCalendars(); }, 2000);
+setTimeout(() => { warm(); warmCalendars(); warmJunk(); }, 2000);
 setInterval(warm, 60 * 1000);
+setInterval(warmJunk, 2 * 60 * 1000);
 setInterval(warmCalendars, 5 * 60 * 1000);

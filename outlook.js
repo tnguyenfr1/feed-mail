@@ -83,6 +83,23 @@ export async function fetchFeed(acct) {
   });
 }
 
+// The newest messages in Outlook's Junk Email folder.
+export async function fetchJunk(acct, size) {
+  const r = await graph(acct, '/me/mailFolders/junkemail/messages', {
+    query: { $top: String(size), $orderby: 'receivedDateTime desc', $select: LIST_FIELDS },
+  });
+  return (r.value || []).filter((m) => !m.isDraft).map((m) => ({
+    id: `${acct.id}:junk:${m.id}`, acct: acct.id, uid: m.id, box: 'junk',
+    date: utc(m.receivedDateTime), from: person(m.from), to: people(m.toRecipients),
+    subject: m.subject || '(no subject)', messageId: m.internetMessageId || null,
+    attach: !!m.hasAttachments, preview: preview(m.bodyPreview), seen: !!m.isRead,
+  }));
+}
+
+export async function notJunk(acct, uid) {
+  await graph(acct, `/me/messages/${encodeURIComponent(uid)}/move`, { method: 'POST', body: { destinationId: 'inbox' } });
+}
+
 export async function getThread(acct, key) {
   const conversationId = key.replace(/^o/, '');
   const sent = await sentState(acct);
@@ -159,7 +176,7 @@ function inviteFrom(m) {
 
 export async function getMessage(acct, uid, box = 'inbox') {
   const m = await loadMessage(acct, uid);
-  if (box === 'inbox' && !m.isRead) {
+  if (box !== 'sent' && !m.isRead) {
     graph(acct, `/me/messages/${encodeURIComponent(uid)}`, { method: 'PATCH', body: { isRead: true } }).catch(() => {});
   }
 

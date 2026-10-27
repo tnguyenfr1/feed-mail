@@ -93,6 +93,13 @@ header.top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.01em; }
 .chip .dot { width: 8px; height: 8px; border-radius: 50%; }
 .chip.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .chip .count { opacity: .7; }
+.chip.junk { border-style: dashed; }
+.chip.junk.has { border-color: var(--danger); color: var(--danger); border-style: solid; }
+.chip.junk.on { background: var(--danger); border-color: var(--danger); color: #fff; }
+.junk-head { color: var(--muted); font-size: 13px; padding: 6px 6px 2px; }
+.junk-note { font-size: 13px; padding: 8px 12px; border-radius: 10px; margin-bottom: 10px;
+  background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--ink); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.junk-note span { flex: 1; min-width: 180px; }
 
 .banner { margin: 0 16px 10px; padding: 10px 12px; border-radius: 10px; font-size: 13px;
   background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
@@ -124,8 +131,10 @@ html, body { overscroll-behavior-y: none; }
 .preview { color: var(--muted); font-size: 14px; margin-top: 2px;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .card.unread .subject { font-weight: 700; }
-.card.unread .name::after { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--unread); margin-left: 6px; vertical-align: middle; }
+.card.unread .name::after { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--acct); margin-left: 6px; vertical-align: middle; }
+.who .acct::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--acct); margin-right: 5px; vertical-align: 1px; }
 .tags { display: inline-flex; gap: 4px; margin-left: 4px; color: var(--muted); font-size: 12px; }
 .empty { text-align: center; color: var(--muted); padding: 48px 16px; }
 
@@ -163,7 +172,11 @@ html, body { overscroll-behavior-y: none; }
 
 .composer { border-top: 1px solid var(--line); background: var(--card); padding: 12px 16px;
   padding-bottom: max(12px, env(safe-area-inset-bottom)); }
-.composer textarea { min-height: 110px; resize: vertical; background: var(--bg); }
+.composer textarea { min-height: 110px; max-height: 75vh; resize: none; background: var(--bg); display: block; }
+.reply-grip { display: none; height: 18px; margin: -8px 0 4px; cursor: ns-resize; touch-action: none; }
+.reply-grip::before { content: ""; display: block; width: 44px; height: 5px; border-radius: 3px; background: var(--line); margin: 7px auto 0; }
+.reply-grip:hover::before { background: var(--muted); }
+.composer:not(.collapsed) .reply-grip { display: block; }
 .composer .actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .composer .actions .to { flex: 1; font-size: 13px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -191,6 +204,8 @@ html, body { overscroll-behavior-y: none; }
 .colors { display: flex; gap: 8px; flex-wrap: wrap; }
 .colors button { width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; }
 .colors button.on { border-color: var(--ink); }
+.colors.small { gap: 6px; padding: 2px 0 8px; }
+.colors.small button { width: 22px; height: 22px; }
 .hint { font-size: 13px; color: var(--muted); background: var(--bg); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
 /* ---------- calendar panel ---------- */
 .reader-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
@@ -422,7 +437,7 @@ html, body { overflow-x: hidden; }
 <script>
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const COLORS = ['#3b6cf6', '#7c3aed', '#db2777', '#ea580c', '#16a34a', '#0891b2', '#ca8a04', '#64748b'];
+const COLORS = ['#3b6cf6', '#ea4335', '#16a34a', '#7c3aed', '#ea580c', '#0891b2', '#db2777', '#ca8a04', '#64748b'];
 
 const state = { accounts: [], items: [], status: {}, filter: 'all', current: null, loading: false };
 
@@ -511,8 +526,9 @@ async function loadFeed(force = false) {
   $('#refreshBtn').classList.add('spin');
   try {
     const data = await api('/feed' + (force ? '?refresh=1' : ''));
-    state.items = data.items; state.status = data.status;
+    state.items = data.items; state.status = data.status; state.junkCounts = data.junk || {};
     renderChips(); renderFeed();
+    if (state.junkView) loadJunk(force);
     // Some inbox was still refreshing on the Pi: pick up its news shortly.
     if (Object.values(data.status).some((x) => x.loading)) setTimeout(() => loadFeed(), 4000);
   } catch (err) { if (err.message !== 'Not logged in') toast(err.message); }
@@ -521,18 +537,68 @@ async function loadFeed(force = false) {
 }
 
 function renderChips() {
-  const unread = (id) => state.items.filter((i) => !i.seen && (id === 'all' || i.acct === id)).length;
+  const items = state.junkView ? state.junk?.items || [] : state.items;
+  const unread = (id) => items.filter((i) => !i.seen && (id === 'all' || i.acct === id)).length;
   const chip = (id, label, color) => {
     const n = unread(id);
     return `<button class="chip ${state.filter === id ? 'on' : ''}" data-f="${id}">
       ${color ? `<span class="dot" style="background:${color}"></span>` : ''}${esc(label)}${n ? ` <span class="count">${n}</span>` : ''}</button>`;
   };
+  // Unread junk across all accounts, from the last check (or the open Junk list).
+  const junkN = state.junk ? state.junk.items.filter((i) => !i.seen).length
+    : Object.values(state.junkCounts || {}).reduce((n, j) => n + (j.unread || 0), 0);
+  const junkChip = `<button class="chip junk ${state.junkView ? 'on' : ''} ${junkN ? 'has' : ''}" data-junk title="Junk and spam from every account">
+    ⚠ Junk${junkN ? ` <span class="count">${junkN}</span>` : ''}</button>`;
   // Chips stay short: the account's name, or the part of the address before the @.
-  $('#chips').innerHTML = chip('all', 'All') + state.accounts.map((a) => chip(a.id, a.name || a.email.split('@')[0], a.color)).join('');
-  const errs = state.accounts.filter((a) => state.status[a.id]?.error);
-  $('#banners').innerHTML = errs.map((a) => `<div class="banner"><b>${esc(acctLabel(a))}:</b> ${esc(state.status[a.id].error)}</div>`).join('');
+  $('#chips').innerHTML = chip('all', 'All') + junkChip + state.accounts.map((a) => chip(a.id, a.name || a.email.split('@')[0], a.color)).join('');
+  const status = state.junkView ? state.junk?.status || {} : state.status;
+  const errs = state.accounts.filter((a) => status[a.id]?.error);
+  $('#banners').innerHTML = errs.map((a) => `<div class="banner"><b>${esc(acctLabel(a))}${state.junkView ? ' junk' : ''}:</b> ${esc(status[a.id].error)}</div>`).join('');
 }
+
+// ---------- junk: every account's junk / spam folder in one list ----------
+function openJunk() {
+  if (state.junkView) return closeJunk();
+  if (state.search) closeSearch();
+  pushLayer('junk');
+  state.junkView = true;
+  if (!state.junk) state.junk = { items: [], status: {}, loading: true };
+  renderChips(); renderFeed();
+  $('#feed').scrollTop = 0;
+  loadJunk();
+}
+function closeJunk(fromHistory = false) {
+  if (!state.junkView) return;
+  if (!fromHistory && !popLayer('junk')) return;
+  state.junkView = false;
+  renderChips(); renderFeed();
+}
+async function loadJunk(force = false) {
+  if (state.junkLoading) return;
+  state.junkLoading = true;
+  try {
+    const data = await api('/junk' + (force ? '?refresh=1' : ''));
+    state.junk = { items: data.items, status: data.status, loading: false };
+    if (state.junkView) { renderChips(); renderFeed(); }
+    if (Object.values(data.status).some((x) => x.loading)) setTimeout(() => { state.junkView && loadJunk(); }, 4000);
+  } catch (err) { if (err.message !== 'Not logged in') toast(err.message); if (state.junk) state.junk.loading = false; }
+  state.junkLoading = false;
+}
+// Take an email out of whichever list it's in (inbox feed or junk).
+function dropItem(it) {
+  state.items = state.items.filter((x) => x.id !== it.id);
+  if (state.junk) state.junk.items = state.junk.items.filter((x) => x.id !== it.id);
+}
+async function markNotJunk(it) {
+  await api(`/msg/${it.acct}/${encodeURIComponent(it.uid)}/notjunk`, { method: 'POST' });
+  dropItem(it);
+  renderChips(); renderFeed();
+  toast(`Moved to the ${acctLabel(acctOf(it.acct))} inbox ✓`);
+  setTimeout(() => loadFeed(), 1500);
+}
+
 $('#chips').addEventListener('click', (e) => {
+  if (e.target.closest('[data-junk]')) return openJunk();
   const b = e.target.closest('.chip'); if (!b) return;
   state.filter = b.dataset.f; renderChips(); renderFeed();
   if (state.search?.q) runSearch(state.search.q);
@@ -573,8 +639,10 @@ function setView(v) {
 
 // Turn the flat list of inbox emails into feed entries.
 function feedEntries() {
-  const items = state.items.filter((i) => (state.filter === 'all' || i.acct === state.filter) && !pendingDeletes.has(i.id));
-  if (state.view !== 'conv') return items.map((it) => ({ key: it.id, latest: it, items: [it] }));
+  const source = state.junkView ? state.junk?.items || [] : state.items;
+  const items = source.filter((i) => (state.filter === 'all' || i.acct === state.filter) && !pendingDeletes.has(i.id));
+  // Junk is shown one email at a time: no conversations there.
+  if (state.view !== 'conv' || state.junkView) return items.map((it) => ({ key: it.id, latest: it, items: [it] }));
   const groups = new Map();
   for (const it of items) {
     const k = `${it.acct}|${it.thread || it.uid}`;
@@ -663,8 +731,14 @@ function renderFeed() {
     return;
   }
   const entries = feedEntries();
-  if (!entries.length) { $('#feed').innerHTML = `<div class="empty">${state.loading ? 'Loading…' : 'Nothing here.'}</div>`; return; }
-  let html = '', lastDay = '';
+  const junk = state.junkView;
+  const junkTop = junk ? `<div class="junk-head">Junk &amp; spam from ${state.filter === 'all' ? 'all your accounts' : esc(acctLabel(acctOf(state.filter)))}, newest first.
+    Images stay hidden. <b>📥</b> moves an email back to its inbox.</div>` : '';
+  if (!entries.length) {
+    $('#feed').innerHTML = junkTop + `<div class="empty">${(junk ? state.junk?.loading : state.loading) ? 'Loading…' : junk ? 'No junk. 🎉' : 'Nothing here.'}</div>`;
+    return;
+  }
+  let html = junkTop, lastDay = '';
   for (const g of entries) {
     const it = g.latest;
     const day = dayLabel(it.date);
@@ -681,12 +755,12 @@ function renderFeed() {
       : (it.from?.name || it.from?.address || 'Unknown');
     html += `<div class="swipe" data-key="${esc(g.key)}">
       <div class="swipe-bg"><span class="sw-read">✉ ${unread ? 'Read' : 'Unread'}</span><span class="sw-del">Delete 🗑</span></div>
-      <div class="card-acts"><button data-qa="read" title="${unread ? 'Mark read' : 'Mark unread'}" aria-label="${unread ? 'Mark read' : 'Mark unread'}">✉</button><button data-qa="delete" title="Delete" aria-label="Delete">🗑</button></div>
+      <div class="card-acts">${junk ? '<button data-qa="notjunk" title="Not junk: move to inbox" aria-label="Not junk">📥</button>' : ''}<button data-qa="read" title="${unread ? 'Mark read' : 'Mark unread'}" aria-label="${unread ? 'Mark read' : 'Mark unread'}">✉</button><button data-qa="delete" title="Delete" aria-label="Delete">🗑</button></div>
       <button class="card ${unread ? 'unread' : ''} ${active ? 'active' : ''}" style="--acct:${a.color}" data-key="${esc(g.key)}">
       <div class="row">
         <div class="avatar">${esc(initials(it.from))}</div>
         <div class="who"><div class="name">${esc(people)}${count > 1 ? ` <span class="cnt">${count}</span>` : ''}</div>
-          <div class="acct">to ${esc(acctLabel(a))}</div></div>
+          <div class="acct">${junk ? 'junk in' : 'to'} ${esc(acctLabel(a))}</div></div>
         <div class="when">${esc(fmtWhen(it.date))}</div>
       </div>
       <div class="subject">${repliedAt !== null ? `<span class="rp">↩ Replied${repliedAt ? ' · ' + esc(fmtWhen(repliedAt)) : ''}</span>` : ''}${esc(it.subject)}<span class="tags">${g.items.some((x) => x.attach) ? '📎' : ''}</span></div>
@@ -705,7 +779,8 @@ $('#feed').addEventListener('click', (e) => {
   const qa = e.target.closest('[data-qa]');
   if (qa) {
     const g = feedEntries().find((x) => x.key === qa.closest('.swipe').dataset.key);
-    if (g) qa.dataset.qa === 'delete' ? quickDelete(g) : quickToggleRead(g);
+    if (g && qa.dataset.qa === 'notjunk') markNotJunk(g.latest).catch((err) => toast(err.message));
+    else if (g) qa.dataset.qa === 'delete' ? quickDelete(g) : quickToggleRead(g);
     return;
   }
   const c = e.target.closest('.card'); if (!c) return;
@@ -719,13 +794,15 @@ const pendingDeletes = new Map(); // item id -> timer; deleted for real after th
 let justSwiped = false;
 const UNDO_MS = 5000;
 
+const inFeed = (x) => ['inbox', 'junk'].includes(x.box || 'inbox');
+
 function quickDelete(g) {
-  const items = g.items.filter((x) => (x.box || 'inbox') === 'inbox');
+  const items = g.items.filter(inFeed);
   if (!items.length) return;
   const commit = (it) => {
     pendingDeletes.delete(it.id);
-    api(`/msg/${it.acct}/${encodeURIComponent(it.uid)}`, { method: 'DELETE' })
-      .then(() => { state.items = state.items.filter((x) => x.id !== it.id); })
+    api(msgUrl(it), { method: 'DELETE' })
+      .then(() => dropItem(it))
       .catch((err) => { toast(`Couldn't delete: ${err.message}`); renderFeed(); });
   };
   for (const it of items) pendingDeletes.set(it.id, setTimeout(() => commit(it), UNDO_MS));
@@ -744,22 +821,23 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden || !pendingDeletes.size) return;
   for (const [id, timer] of pendingDeletes) {
     clearTimeout(timer);
-    const it = state.items.find((x) => x.id === id);
-    if (it) fetch(`/api/msg/${it.acct}/${encodeURIComponent(it.uid)}`, { method: 'DELETE', keepalive: true }).catch(() => {});
+    const it = [...state.items, ...(state.junk?.items || [])].find((x) => x.id === id);
+    if (it) fetch('/api' + msgUrl(it), { method: 'DELETE', keepalive: true }).catch(() => {});
   }
   state.items = state.items.filter((x) => !pendingDeletes.has(x.id));
+  if (state.junk) state.junk.items = state.junk.items.filter((x) => !pendingDeletes.has(x.id));
   pendingDeletes.clear();
 });
 
 async function quickToggleRead(g) {
-  const items = g.items.filter((x) => (x.box || 'inbox') === 'inbox');
+  const items = g.items.filter(inFeed);
   const makeRead = items.some((x) => !x.seen);
   // Reading marks the whole conversation; "unread" just flags the newest one.
   const targets = makeRead ? items.filter((x) => !x.seen) : items.slice(0, 1);
   for (const it of targets) it.seen = makeRead;
   renderChips(); renderFeed();
   try {
-    await Promise.all(targets.map((it) => api(`/msg/${it.acct}/${encodeURIComponent(it.uid)}/seen`, { method: 'POST', body: { seen: makeRead } })));
+    await Promise.all(targets.map((it) => api(msgUrl(it, '/seen'), { method: 'POST', body: { seen: makeRead } })));
   } catch (err) {
     for (const it of targets) it.seen = !makeRead;
     renderChips(); renderFeed();
@@ -843,6 +921,7 @@ window.addEventListener('popstate', () => {
   if (sheet && history.state?.fm !== 'sheet') { sheet._close?.(true); return; }
   if (state.current && history.state?.fm !== 'reader') { closeReader(true); return; }
   if (state.search && history.state?.fm !== 'search') { closeSearch(true); return; }
+  if (state.junkView && !['junk', 'search'].includes(history.state?.fm)) { closeJunk(true); return; }
   if (history.state?.fm === 'root') {
     if (Date.now() - leaveWarnedAt < 2000) { history.back(); return; }
     leaveWarnedAt = Date.now();
@@ -1168,6 +1247,7 @@ function messageHtml(conv, m, idx) {
     const f = m.full;
     const hasRemote = f.html && /<img[^>]+src=["']?https?:/i.test(f.html);
     body = `<div class="muted tm-to">to ${esc(f.to.map(fmtAddr).join(', '))}${f.cc.length ? ' · cc ' + esc(f.cc.map(fmtAddr).join(', ')) : ''}</div>
+      ${meta.box === 'junk' ? `<div class="junk-note"><span>⚠ This was in <b>${esc(acctLabel(a))}</b> junk. Be careful with links and attachments.</span><button class="btn ghost" data-act="notjunk" data-idx="${idx}">📥 Not junk</button></div>` : ''}
       ${conv.msgs.length === 1 ? repliedBar(m) : ''}
       ${hasRemote && !m.showImages ? `<div class="img-note">Images from the internet are hidden to protect your privacy.<button class="btn ghost" data-act="images" data-idx="${idx}">Show images</button></div>` : ''}
       ${f.html
@@ -1181,7 +1261,7 @@ function messageHtml(conv, m, idx) {
   const actions = m.full && !m.full.error ? `<div class="tm-actions">
       ${single ? '' : `<button class="btn ghost" data-act="replyto" data-idx="${idx}">↩ Reply to this</button>`}
       ${single || !many ? '' : `<button class="btn ghost" data-act="replyall" data-idx="${idx}">↩ Reply all to this</button>`}
-      ${m.meta.box === 'inbox' && m.meta.uid ? `<span class="spacer"></span><button class="btn danger" data-act="delete" data-idx="${idx}">Delete</button>` : ''}
+      ${inFeed(m.meta) && m.meta.uid ? `<span class="spacer"></span><button class="btn danger" data-act="delete" data-idx="${idx}">Delete</button>` : ''}
     </div>` : '';
   return `<div class="tmsg open ${isMe(conv, m) ? 'mine' : ''} ${isTarget ? 'target' : ''}" data-idx="${idx}">${head}<div class="tm-body">${body}</div>${actions}</div>`;
 }
@@ -1204,6 +1284,7 @@ function renderConversation(conv) {
     </div>${hasCal ? '<details class="cal" id="calPanel"></details>' : ''}</div></div></div>
     <div class="composer collapsed">
       <button class="reply-stub" data-act="expand" id="replyStub">↩ Reply…</button>
+      <div class="reply-grip" id="replyGrip" title="Drag to make the reply box bigger or smaller"></div>
       <div class="reply-target" id="replyTarget"></div>
       <textarea id="replyText" placeholder="Write a reply…"></textarea>
       <div class="files" id="replyFiles"></div>
@@ -1310,7 +1391,33 @@ function setupComposer(conv) {
     files.splice(Number(x.dataset.rmfile), 1); renderFiles();
   });
   const composer = $('.composer', r);
-  const expand = () => { composer.classList.remove('collapsed'); $('#replyText').focus(); };
+  const ta = $('#replyText');
+  // The reply box grows with what you write; drag the bar on top to set its size yourself.
+  let userH = Number(localStorage.getItem('fm_reply_h')) || 0;
+  const maxH = () => Math.round(window.innerHeight * 0.75);
+  const fitBox = () => {
+    if (composer.classList.contains('collapsed')) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(maxH(), Math.max(userH || 110, ta.scrollHeight + 2)) + 'px';
+  };
+  ta.addEventListener('input', fitBox);
+  $('#replyGrip').addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    const grip = e.currentTarget;
+    grip.setPointerCapture(e.pointerId);
+    const y0 = e.clientY, h0 = ta.offsetHeight;
+    const move = (ev) => { userH = Math.min(maxH(), Math.max(80, h0 + (y0 - ev.clientY))); ta.style.height = userH + 'px'; };
+    const up = () => {
+      grip.removeEventListener('pointermove', move);
+      try { localStorage.setItem('fm_reply_h', String(userH)); } catch {}
+    };
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', up, { once: true });
+    grip.addEventListener('pointercancel', up, { once: true });
+  });
+  // Double-click the bar: back to the normal size.
+  $('#replyGrip').addEventListener('dblclick', () => { userH = 0; try { localStorage.removeItem('fm_reply_h'); } catch {} fitBox(); });
+  const expand = () => { composer.classList.remove('collapsed'); fitBox(); ta.focus(); };
   const collapseIfEmpty = () => {
     if (!$('#replyText').value.trim() && !files.length) composer.classList.add('collapsed');
   };
@@ -1357,19 +1464,28 @@ function setupComposer(conv) {
       return;
     }
     if (act === 'unread') {
-      const latest = [...conv.msgs].reverse().find((x) => x.meta.box === 'inbox' && x.meta.uid);
+      const latest = [...conv.msgs].reverse().find((x) => inFeed(x.meta) && x.meta.uid);
       if (!latest) return;
-      await api(`/msg/${conv.acct}/${encodeURIComponent(latest.meta.uid)}/seen`, { method: 'POST', body: { seen: false } }).catch((err) => toast(err.message));
-      const it = state.items.find((i) => i.acct === conv.acct && i.uid === latest.meta.uid);
+      await api(msgUrl({ ...latest.meta, acct: conv.acct }, '/seen'), { method: 'POST', body: { seen: false } }).catch((err) => toast(err.message));
+      const it = [...state.items, ...(state.junk?.items || [])].find((i) => i.acct === conv.acct && i.uid === latest.meta.uid && (i.box || 'inbox') === latest.meta.box);
       if (it) it.seen = false;
       renderChips(); closeReader(); return;
+    }
+    if (act === 'notjunk') {
+      b.disabled = true;
+      try {
+        await markNotJunk({ ...m.meta, acct: conv.acct, id: `${conv.acct}:junk:${m.meta.uid}` });
+        closeReader();
+      } catch (err) { toast(err.message); b.disabled = false; }
+      return;
     }
     if (act === 'delete') {
       if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Tap again to delete'; return; }
       b.disabled = true;
       try {
-        await api(`/msg/${conv.acct}/${encodeURIComponent(m.meta.uid)}`, { method: 'DELETE' });
+        await api(msgUrl({ ...m.meta, acct: conv.acct }), { method: 'DELETE' });
         state.items = state.items.filter((i) => !(i.acct === conv.acct && i.uid === m.meta.uid));
+        if (state.junk) state.junk.items = state.junk.items.filter((i) => !(i.acct === conv.acct && i.uid === m.meta.uid));
         conv.msgs = conv.msgs.filter((x) => x !== m);
         renderChips(); toast('Moved to Trash');
         if (!conv.msgs.length) return closeReader();
@@ -1743,7 +1859,7 @@ async function openSettings() {
     back.remove();
     loadFeed(true);
   };
-  let color = COLORS[state.accounts.length % COLORS.length];
+  let color = COLORS.find((c) => !state.accounts.some((a) => a.color === c)) || COLORS[state.accounts.length % COLORS.length];
   back.innerHTML = `<div class="sheet" role="dialog" aria-label="Accounts">
     <div style="display:flex;align-items:center"><h2 style="flex:1">Accounts</h2><button class="icon-btn" data-close aria-label="Close">✕</button></div>
     <div id="acctList"></div>
@@ -1821,6 +1937,7 @@ async function openSettings() {
       ? state.accounts.map((a) => `<div class="acct-row"><span class="chip"><span class="dot" style="background:${a.color}"></span></span>
           <div class="info"><div>${esc(acctLabel(a))}</div><div>${esc(a.email)} · ${esc(a.provider.toUpperCase())}</div></div>
           <button class="btn danger" data-del="${a.id}">Remove</button></div>
+          <div class="colors small" data-recolor="${a.id}" title="This account's colour in the feed">${COLORS.map((c) => `<button type="button" data-rc="${c}" style="background:${c}" class="${c === a.color ? 'on' : ''}" aria-label="colour ${c}"></button>`).join('')}</div>
           ${a.provider === 'gmail' || a.provider === 'outlook' ? `<div style="padding:4px 0 6px"><a class="btn ghost" style="padding:6px 12px;font-size:13px;text-decoration:none;display:inline-block" href="/oauth/${a.provider === 'gmail' ? 'google' : 'microsoft'}/start">Reconnect ${a.provider === 'gmail' ? 'Google' : 'Microsoft'}</a></div>` : ''}
           ${a.calPasswordAllowed ? `<form class="calpw" data-acct="${a.id}" style="display:flex;gap:8px;padding:8px 0 4px;align-items:center">
             <input type="password" name="calPassword" autocomplete="new-password" placeholder="${a.hasCalPassword ? 'Calendar password saved ✓ (type to change)' : 'Calendar password (only if different)'}"
@@ -1832,6 +1949,16 @@ async function openSettings() {
 
   back.addEventListener('click', async (e) => {
     if (e.target === back || e.target.closest('[data-close]')) { back._close(); return; }
+    const rc = e.target.closest('[data-rc]');
+    if (rc) {
+      const id = rc.closest('[data-recolor]').dataset.recolor;
+      try {
+        const updated = await api('/accounts/' + id, { method: 'PATCH', body: { color: rc.dataset.rc } });
+        Object.assign(state.accounts.find((a) => a.id === id), updated);
+        list(); renderChips(); renderFeed();
+      } catch (err) { toast(err.message); }
+      return;
+    }
     const c = e.target.closest('[data-c]');
     if (c) { color = c.dataset.c; back.querySelectorAll('[data-c]').forEach((x) => x.classList.toggle('on', x === c)); return; }
     const del = e.target.closest('[data-del]');
@@ -1908,7 +2035,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && st
     try {
       const { v } = await (await fetch('/version', { cache: 'no-store' })).json();
       if (loaded === null) { loaded = v; return; }
-      if (v !== loaded && !state.current && !state.draft && !state.search && !$('.sheet-back')) location.reload();
+      if (v !== loaded && !state.current && !state.draft && !state.search && !state.junkView && !$('.sheet-back')) location.reload();
     } catch {}
   };
   check();

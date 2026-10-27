@@ -12,6 +12,7 @@ import * as outlook from './outlook.js';
 const viaGraph = (acct) => acct.provider === 'outlook';
 
 const FEED_SIZE = 50; // newest messages per account
+const JUNK_SIZE = 30; // newest junk / spam messages per account
 const PREVIEW_BYTES = 20000; // enough of each message to build a preview
 
 const clients = new Map(); // account id -> Promise<ImapFlow>
@@ -57,6 +58,7 @@ async function getClient(acct) {
 export function dropClient(acctId) {
   outlook.dropOutlook(acctId);
   known.delete(acctId);
+  knownJunk.delete(acctId);
   sentCache.delete(acctId);
   const p = clients.get(acctId);
   clients.delete(acctId);
@@ -121,11 +123,24 @@ async function allMailPath(acct) {
   return c.fmAllPath;
 }
 
-// Messages live in INBOX, the Sent folder, or (Gmail search results) All Mail.
+// Junk / spam: the folder the server marks as \Junk, else a usual name
+// (Yahoo and AOL call it "Bulk", others "Spam" or "Junk").
+async function junkPath(acct) {
+  const c = await getClient(acct);
+  if (c.fmJunkPath === undefined) {
+    const boxes = await c.list();
+    c.fmJunkPath = (boxes.find((b) => b.specialUse === '\\Junk')
+      || boxes.find((b) => /^(junk|junk e-?mail|spam|bulk|bulk mail|courrier ind[ée]sirable|ind[ée]sirables)$/i.test(b.name)))?.path || null;
+  }
+  return c.fmJunkPath;
+}
+
+// Messages live in INBOX, the Sent folder, Junk, or (Gmail search results) All Mail.
+const BOX_NAMES = { all: 'All Mail', sent: 'Sent', junk: 'Junk' };
 async function boxPath(acct, box) {
   if (box === 'inbox') return 'INBOX';
-  const path = box === 'all' ? await allMailPath(acct) : await sentPath(acct);
-  if (!path) throw Object.assign(new Error(`No ${box === 'all' ? 'All Mail' : 'Sent'} folder found.`), { status: 404 });
+  const path = box === 'all' ? await allMailPath(acct) : box === 'junk' ? await junkPath(acct) : await sentPath(acct);
+  if (!path) throw Object.assign(new Error(`No ${BOX_NAMES[box] || box} folder found.`), { status: 404 });
   return path;
 }
 
@@ -143,7 +158,7 @@ async function sentState(acct) {
         uid: true, envelope: true, internalDate: true, headers: ['references'], ...(isGmail(acct) && { threadId: true }),
       })) {
         const env = m.envelope || {};
-        const date = (env.date || m.internalDate || new Date()).toISOString();
+        const date = isoDate(env.date, m.internalDate);
         const inReplyTo = msgIds(env.inReplyTo);
         for (const id of inReplyTo) {
           const prev = map.get(id);
@@ -285,6 +300,15 @@ function hasAttachment(node) {
   return (node.childNodes || []).some(hasAttachment);
 }
 
+// Spam often has a broken Date header: use the first date that makes sense.
+function isoDate(...candidates) {
+  for (const d of candidates) {
+    const t = d instanceof Date ? d : d ? new Date(d) : null;
+    if (t && !isNaN(t)) return t.toISOString();
+  }
+  return new Date().toISOString();
+}
+
 function addr(a) {
   return a ? { name: a.name || '', address: a.address || '' } : null;
 }
@@ -300,7 +324,7 @@ async function baseItem(acct, m, box = 'inbox') {
     id: box === 'inbox' ? `${acct.id}:${m.uid}` : `${acct.id}:${box}:${m.uid}`,
     acct: acct.id,
     uid: m.uid,
-    date: (env.date || m.internalDate || new Date()).toISOString(),
+    date: isoDate(env.date, m.internalDate),
     from: addr(env.from?.[0]),
     to: (env.to || []).map(addr),
     subject: env.subject || '(no subject)',
@@ -436,6 +460,52 @@ export async function fetchFeed(acct) {
   });
 }
 
+// The newest junk / spam, as feed cards (no conversations, no reply tracking).
+const knownJunk = new Map(); // account id -> { validity, byUid: Map(uid -> item) }
+
+export async function fetchJunk(acct) {
+  if (viaGraph(acct)) return outlook.fetchJunk(acct, JUNK_SIZE);
+
+  const path = await junkPath(acct);
+  if (!path) return [];
+  const { flags, fresh, validity } = await withMailbox(acct, path, async (c) => {
+    const exists = c.mailbox.exists;
+    const validity = String(c.mailbox.uidValidity);
+    if (!exists) return { flags: [], fresh: [], validity };
+    const flags = [];
+    for await (const m of c.fetch(`${Math.max(1, exists - JUNK_SIZE + 1)}:*`, { uid: true, flags: true })) flags.push(m);
+    const k = knownJunk.get(acct.id);
+    const byUid = k && k.validity === validity ? k.byUid : new Map();
+    const missing = flags.filter((m) => !byUid.has(m.uid)).map((m) => m.uid);
+    const fresh = [];
+    if (missing.length) {
+      for await (const m of c.fetch(missing.join(','), {
+        uid: true, envelope: true, internalDate: true, bodyStructure: true, source: { maxLength: PREVIEW_BYTES },
+      }, { uid: true })) fresh.push(m);
+    }
+    return { flags, fresh, validity };
+  }, { fresh: true });
+
+  const prev = knownJunk.get(acct.id);
+  const byUid = prev && prev.validity === validity ? prev.byUid : new Map();
+  for (const m of fresh) byUid.set(m.uid, await baseItem(acct, m, 'junk'));
+  const current = new Set(flags.map((m) => m.uid));
+  for (const uid of byUid.keys()) if (!current.has(uid)) byUid.delete(uid);
+  knownJunk.set(acct.id, { validity, byUid });
+
+  return flags.filter((m) => byUid.has(m.uid)).map((m) => {
+    const { refs, inReplyTo, gThread, ...item } = byUid.get(m.uid);
+    return { ...item, box: 'junk', seen: m.flags?.has('\\Seen') || false };
+  });
+}
+
+// "Not junk": put it back in the inbox (the provider learns from this too).
+export async function notJunk(acct, uid) {
+  if (viaGraph(acct)) return outlook.notJunk(acct, uid);
+
+  await withMailbox(acct, await boxPath(acct, 'junk'), (c) => c.messageMove(String(uid), 'INBOX', { uid: true }));
+}
+
 async function fetchParsed(acct, uid, c) {
   let m = await c.fetchOne(String(uid), { source: true, flags: true }, { uid: true });
   if (!m) {
@@ -492,7 +562,7 @@ export async function getMessage(acct, uid, box = 'inbox') {
     invite: box === 'inbox' ? invite : null,
     dates: findDates(parsed.subject, parsed.text, parsed.date || new Date()),
     subject: parsed.subject || '(no subject)',
-    date: (parsed.date || new Date()).toISOString(),
+    date: isoDate(parsed.date),
     from: list(parsed.from)[0] || null,
     to: list(parsed.to),
     cc: list(parsed.cc),
@@ -555,19 +625,19 @@ async function findSpecial(c, use) {
   return boxes.find((b) => b.specialUse === use)?.path;
 }
 
-export async function setSeen(acct, uid, seen) {
+export async function setSeen(acct, uid, seen, box = 'inbox') {
   if (viaGraph(acct)) return outlook.setSeen(acct, uid, seen);
 
-  await withInbox(acct, (c) =>
+  await withMailbox(acct, await boxPath(acct, box), (c) =>
     seen
       ? c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true })
       : c.messageFlagsRemove(String(uid), ['\\Seen'], { uid: true }));
 }
 
-export async function deleteMessage(acct, uid) {
+export async function deleteMessage(acct, uid, box = 'inbox') {
   if (viaGraph(acct)) return outlook.deleteMessage(acct, uid);
 
-  await withInbox(acct, async (c) => {
+  await withMailbox(acct, await boxPath(acct, box), async (c) => {
     const trash = await findSpecial(c, '\\Trash');
     if (trash) await c.messageMove(String(uid), trash, { uid: true });
     else await c.messageDelete(String(uid), { uid: true });
