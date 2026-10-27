@@ -96,6 +96,26 @@ export async function fetchJunk(acct, size) {
   }));
 }
 
+// Move Junk Email received up to `upto` (newest one I've seen) to Deleted Items.
+export async function emptyJunk(acct, upto) {
+  const until = new Date(upto);
+  if (isNaN(until)) return 0;
+  let moved = 0;
+  for (let round = 0; round < 20; round++) {
+    const r = await graph(acct, '/me/mailFolders/junkemail/messages', {
+      query: { $filter: `receivedDateTime le ${until.toISOString()}`, $top: '50', $select: 'id' },
+    });
+    const ids = (r.value || []).map((m) => m.id);
+    if (!ids.length) break;
+    for (let i = 0; i < ids.length; i += 5) {
+      await Promise.all(ids.slice(i, i + 5).map((id) =>
+        graph(acct, `/me/messages/${encodeURIComponent(id)}/move`, { method: 'POST', body: { destinationId: 'deleteditems' } })));
+    }
+    moved += ids.length;
+  }
+  return moved;
+}
+
 export async function notJunk(acct, uid) {
   await graph(acct, `/me/messages/${encodeURIComponent(uid)}/move`, { method: 'POST', body: { destinationId: 'inbox' } });
 }

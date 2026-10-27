@@ -589,6 +589,37 @@ function dropItem(it) {
   state.items = state.items.filter((x) => x.id !== it.id);
   if (state.junk) state.junk.items = state.junk.items.filter((x) => x.id !== it.id);
 }
+// Empty Junk: only up to the newest email shown per account, so anything
+// that arrived since stays to be checked. Everything goes to Trash.
+async function emptyJunk(btn) {
+  const shown = feedEntries().map((g) => g.latest);
+  if (!shown.length) return;
+  if (btn.dataset.confirm !== '1') {
+    btn.dataset.confirm = '1';
+    btn.textContent = `Tap again: move ${shown.length > 1 ? 'all ' + shown.length : 'it'} to Trash`;
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Emptying…';
+  const upto = {};
+  for (const it of shown) {
+    const outlook = acctOf(it.acct).provider === 'outlook';
+    const mark = outlook ? it.date : Number(it.uid);
+    if (upto[it.acct] === undefined || mark > upto[it.acct]) upto[it.acct] = mark;
+  }
+  try {
+    const { result } = await api('/junk/empty', { method: 'POST', body: { upto } });
+    const failed = Object.entries(result).filter(([, r]) => r.error);
+    const moved = Object.values(result).reduce((n, r) => n + (r.moved || 0), 0);
+    const done = new Set(Object.keys(result).filter((id) => !result[id].error));
+    if (state.junk) state.junk.items = state.junk.items.filter((x) => !(done.has(x.acct) && shown.some((s) => s.id === x.id)));
+    renderChips(); renderFeed();
+    toast(failed.length
+      ? `${acctLabel(acctOf(failed[0][0]))}: ${failed[0][1].error}`
+      : `Junk emptied ✓ ${moved} email${moved === 1 ? '' : 's'} moved to Trash`);
+    setTimeout(() => loadJunk(), 2000);
+  } catch (err) { toast(err.message); btn.disabled = false; btn.textContent = '🗑 Empty junk'; }
+}
+
 async function markNotJunk(it) {
   await api(`/msg/${it.acct}/${encodeURIComponent(it.uid)}/notjunk`, { method: 'POST' });
   dropItem(it);
@@ -733,7 +764,8 @@ function renderFeed() {
   const entries = feedEntries();
   const junk = state.junkView;
   const junkTop = junk ? `<div class="junk-head">Junk &amp; spam from ${state.filter === 'all' ? 'all your accounts' : esc(acctLabel(acctOf(state.filter)))}, newest first.
-    Images stay hidden. <b>📥</b> moves an email back to its inbox.</div>` : '';
+    Images stay hidden. <b>📥</b> moves an email back to its inbox.</div>
+    ${entries.length ? `<div style="padding:4px 6px 2px"><button class="btn danger" data-emptyjunk style="padding:6px 12px;font-size:13px">🗑 Empty junk${state.filter === 'all' ? '' : ' for ' + esc(acctLabel(acctOf(state.filter)))}</button></div>` : ''}` : '';
   if (!entries.length) {
     $('#feed').innerHTML = junkTop + `<div class="empty">${(junk ? state.junk?.loading : state.loading) ? 'Loading…' : junk ? 'No junk. 🎉' : 'Nothing here.'}</div>`;
     return;
@@ -776,6 +808,8 @@ $('#feed').addEventListener('click', (e) => {
     if (it) { it.seen = true; openConversation({ key: 's:' + it.id, latest: it, items: [it], single: true }); }
     return;
   }
+  const ej = e.target.closest('[data-emptyjunk]');
+  if (ej) { emptyJunk(ej); return; }
   const qa = e.target.closest('[data-qa]');
   if (qa) {
     const g = feedEntries().find((x) => x.key === qa.closest('.swipe').dataset.key);

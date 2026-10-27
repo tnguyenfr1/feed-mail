@@ -506,6 +506,23 @@ export async function notJunk(acct, uid) {
   await withMailbox(acct, await boxPath(acct, 'junk'), (c) => c.messageMove(String(uid), 'INBOX', { uid: true }));
 }
 
+// Empty Junk up to the newest message I've seen (by UID), into Trash;
+// anything newer stays for me to check first. Returns how many were moved.
+export async function emptyJunk(acct, upto) {
+  if (viaGraph(acct)) return outlook.emptyJunk(acct, upto);
+
+  const last = Number(upto);
+  if (!Number.isInteger(last) || last < 1) return 0;
+  return withMailbox(acct, await boxPath(acct, 'junk'), async (c) => {
+    const uids = (await c.search({ uid: `1:${last}` }, { uid: true })) || [];
+    if (!uids.length) return 0;
+    const trash = await findSpecial(c, '\\Trash');
+    if (trash) await c.messageMove(uids.join(','), trash, { uid: true });
+    else await c.messageDelete(uids.join(','), { uid: true });
+    return uids.length;
+  }, { fresh: true });
+}
+
 async function fetchParsed(acct, uid, c) {
   let m = await c.fetchOne(String(uid), { source: true, flags: true }, { uid: true });
   if (!m) {

@@ -397,6 +397,24 @@ app.delete('/api/msg/:acct/:uid', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Empty Junk, per account only up to the newest email the page showed.
+// body: { upto: { [accountId]: uid (IMAP) or received date (Outlook) } }
+app.post('/api/junk/empty', async (req, res) => {
+  const upto = req.body?.upto && typeof req.body.upto === 'object' ? req.body.upto : {};
+  const result = {};
+  await Promise.all(Object.entries(upto).map(async ([id, mark]) => {
+    const acct = accounts.find((a) => a.id === id);
+    if (!acct) return;
+    try {
+      result[id] = { moved: await mail.emptyJunk(acct, mark) };
+    } catch (err) {
+      result[id] = { error: err.message };
+    }
+    refreshJunk(acct);
+  }));
+  res.json({ result });
+});
+
 // Move a message from Junk back to the inbox.
 app.post('/api/msg/:acct/:uid/notjunk', async (req, res, next) => {
   try {
