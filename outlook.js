@@ -98,7 +98,9 @@ export async function fetchJunk(acct, size) {
 
 // Move Junk Email received up to `upto` (newest one I've seen) to Deleted Items.
 export async function emptyJunk(acct, upto) {
-  const until = new Date(upto);
+  // Outlook shows whole seconds but keeps fractions: one second of slack so
+  // the newest email I saw counts as "seen".
+  const until = new Date(new Date(upto).getTime() + 1000);
   if (isNaN(until)) return 0;
   let moved = 0;
   for (let round = 0; round < 20; round++) {
@@ -107,9 +109,12 @@ export async function emptyJunk(acct, upto) {
     });
     const ids = (r.value || []).map((m) => m.id);
     if (!ids.length) break;
-    for (let i = 0; i < ids.length; i += 5) {
-      await Promise.all(ids.slice(i, i + 5).map((id) =>
-        graph(acct, `/me/messages/${encodeURIComponent(id)}/move`, { method: 'POST', body: { destinationId: 'deleteditems' } })));
+    // Outlook allows only a few requests at once per mailbox: two at a time,
+    // and one more try after a pause when it says it's busy.
+    const move = (id) => graph(acct, `/me/messages/${encodeURIComponent(id)}/move`, { method: 'POST', body: { destinationId: 'deleteditems' } });
+    for (let i = 0; i < ids.length; i += 2) {
+      await Promise.all(ids.slice(i, i + 2).map((id) =>
+        move(id).catch(() => new Promise((r) => setTimeout(r, 2000)).then(() => move(id)))));
     }
     moved += ids.length;
   }

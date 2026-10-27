@@ -408,9 +408,13 @@ app.post('/api/junk/empty', async (req, res) => {
     try {
       result[id] = { moved: await mail.emptyJunk(acct, mark) };
     } catch (err) {
+      console.error('empty junk', acct.provider, err.message);
       result[id] = { error: err.message };
     }
-    refreshJunk(acct);
+    // Re-read the folder now, so the page doesn't get the old list back from memory
+    // (a check that started before the emptying would still have the old emails).
+    await junkCache.get(id)?.pending;
+    await refreshJunk(acct);
   }));
   res.json({ result });
 });

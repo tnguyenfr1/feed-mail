@@ -616,7 +616,7 @@ async function emptyJunk(btn) {
     toast(failed.length
       ? `${acctLabel(acctOf(failed[0][0]))}: ${failed[0][1].error}`
       : `Junk emptied ✓ ${moved} email${moved === 1 ? '' : 's'} moved to Trash`);
-    setTimeout(() => loadJunk(), 2000);
+    loadJunk();
   } catch (err) { toast(err.message); btn.disabled = false; btn.textContent = '🗑 Empty junk'; }
 }
 
